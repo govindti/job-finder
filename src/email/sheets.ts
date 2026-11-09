@@ -79,7 +79,7 @@ export async function exportToSheet(opts: ExportOptions): Promise<ExportResult> 
     }
     const sheetId = sheet?.properties?.sheetId ?? 0;
 
-    const jobs = getJobs({
+    const jobs = await getJobs({
         min_score: opts.minScore ?? 0,
         india_friendly: opts.indiaFriendly ?? null,
         source: opts.source ?? null,

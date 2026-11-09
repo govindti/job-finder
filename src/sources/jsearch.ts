@@ -56,7 +56,7 @@ export class JSearchSource implements JobSource {
                     retries: 1,
                 });
                 const success = resp.status === 200;
-                logApiCall("jsearch", success, q.query);
+                await logApiCall("jsearch", success, q.query);
                 if (!success) continue;
 
                 const parsed = jsearchResponseSchema.safeParse(JSON.parse(resp.text));
@@ -66,7 +66,7 @@ export class JSearchSource implements JobSource {
                     if (job) allJobs.push(job);
                 }
             } catch (err) {
-                logApiCall("jsearch", false, String(err).slice(0, 100));
+                await logApiCall("jsearch", false, String(err).slice(0, 100));
                 logger.warn({ err, query: q.query }, "jsearch query failed");
                 continue;
             }

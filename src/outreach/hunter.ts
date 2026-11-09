@@ -1,4 +1,3 @@
-import { getActiveProfile } from "../db/profile.js";
 import type { ActiveProfile, LinkedinTitle } from "../schemas/profile.js";
 
 // LinkedIn people-search URLs need percent-encoding that keeps "/" safe and
@@ -29,8 +28,8 @@ export interface LinkedinSearch {
 const LINKEDIN_BASE = "https://www.linkedin.com/search/results/people/";
 
 /** Build LinkedIn people-search URLs from the profile's search titles. */
-export function buildLinkedinSearches(company: string, profile?: ActiveProfile): LinkedinSearch[] {
-    const p = profile ?? getActiveProfile();
+export function buildLinkedinSearches(company: string, profile: ActiveProfile): LinkedinSearch[] {
+    const p = profile;
     const titles: LinkedinTitle[] = p.outreach.linkedin_search_titles ?? [];
 
     const searches: LinkedinSearch[] = [];
@@ -83,8 +82,8 @@ export interface Dms {
 }
 
 /** Generate short + long LinkedIn DMs using the profile's templates. */
-export function generateDmTemplate(job: DmJob, contact?: DmContact | null, profile?: ActiveProfile): Dms {
-    const p = profile ?? getActiveProfile();
+export function generateDmTemplate(job: DmJob, contact: DmContact | null, profile: ActiveProfile): Dms {
+    const p = profile;
     const out = p.outreach;
 
     const candidateName = out.candidate_name || "[Your Name]";

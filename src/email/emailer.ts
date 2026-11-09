@@ -143,8 +143,8 @@ function renderCard(i: number, item: OutreachUnemailed): string {
     `;
 }
 
-export function buildEmailHtml(items: OutreachUnemailed[], profile?: ActiveProfile): string {
-    const p = profile ?? getActiveProfile();
+export function buildEmailHtml(items: OutreachUnemailed[], profile: ActiveProfile): string {
+    const p = profile;
     const out = p.outreach;
     const candidateName = out.candidate_name || "there";
     const roleWord = out.email_digest_subject_role || "matching";
@@ -191,8 +191,8 @@ export function buildEmailHtml(items: OutreachUnemailed[], profile?: ActiveProfi
 </html>`;
 }
 
-export function buildEmailText(items: OutreachUnemailed[], profile?: ActiveProfile): string {
-    const p = profile ?? getActiveProfile();
+export function buildEmailText(items: OutreachUnemailed[], profile: ActiveProfile): string {
+    const p = profile;
     const out = p.outreach;
     const candidateName = out.candidate_name || "there";
     const greetingTitle = out.email_greeting || "Your Daily Job Digest";
@@ -239,7 +239,7 @@ export interface DigestResult {
 export async function sendDailyDigest(limit?: number, dryRun = false): Promise<DigestResult> {
     const cap = limit ?? env.DAILY_JOBS_COUNT;
 
-    const profile = getActiveProfile();
+    const profile = await getActiveProfile();
     const out = profile.outreach;
     // Sender is fixed to .env (must match SENDER_APP_PASSWORD); only recipient is overridable.
     const sender = env.SENDER_EMAIL;
@@ -252,7 +252,7 @@ export async function sendDailyDigest(limit?: number, dryRun = false): Promise<D
         return { error: "Recipient email not configured (set on profile or RECIPIENT_EMAIL in .env)" };
     }
 
-    const items = getUnemailedOutreach(cap);
+    const items = await getUnemailedOutreach(cap);
     if (!items.length) {
         return { sent: 0, message: "No new outreach items to send" };
     }
@@ -286,14 +286,14 @@ export async function sendDailyDigest(limit?: number, dryRun = false): Promise<D
         await transporter.sendMail({ from: sender, to: recipient, subject, text, html });
 
         const outreachIds = items.map((i) => i.id);
-        markOutreachEmailed(outreachIds);
-        logEmail(recipient, subject, items.length, outreachIds, "sent");
+        await markOutreachEmailed(outreachIds);
+        await logEmail(recipient, subject, items.length, outreachIds, "sent");
         logger.info(`Sent daily digest: ${items.length} items from ${sender} to ${recipient}`);
 
         return { sent: items.length, subject, sender, recipient };
     } catch (err) {
         logger.error(`Email send failed: ${String(err)}`);
-        logEmail(recipient, subject, items.length, items.map((i) => i.id), "failed", String(err));
+        await logEmail(recipient, subject, items.length, items.map((i) => i.id), "failed", String(err));
         return { error: String(err) };
     }
 }
@@ -307,22 +307,26 @@ function titleCase(s: string): string {
  * Create outreach items for the highest-scoring jobs without one yet.
  * `seenAfter` scopes generation to a specific collection run. Returns the count.
  */
-export function generateOutreachForTopJobs(
+export async function generateOutreachForTopJobs(
     limit = 15,
     minScore = 40,
     indiaFriendly: string | null = "maybe",
     seenAfter: string | null = null,
-): number {
-    const profile = getActiveProfile();
+): Promise<number> {
+    const profile = await getActiveProfile();
     const profileId = profile._id;
 
-    const topJobs = getJobs({
+    const topJobs = await getJobs({
         min_score: minScore,
         india_friendly: indiaFriendly,
         seen_after: seenAfter,
         limit: limit * 5,
     });
-    const candidates = topJobs.filter((j) => !outreachExistsForJob(j.id)).slice(0, limit);
+    const candidates: typeof topJobs = [];
+    for (const job of topJobs) {
+        if (candidates.length >= limit) break;
+        if (!(await outreachExistsForJob(job.id))) candidates.push(job);
+    }
 
     // All items in this run share one timestamp so batch filtering is exact.
     const batchTs = utcNowIso();
@@ -355,7 +359,7 @@ export function generateOutreachForTopJobs(
                 emailed_at: "",
                 profile_id: profileId,
             };
-            insertOutreach(row);
+            await insertOutreach(row);
             generated += 1;
         } catch (err) {
             logger.warn(`  Skipped ${job.company}: ${String(err)}`);
@@ -363,7 +367,7 @@ export function generateOutreachForTopJobs(
         }
     }
 
-    if (generated > 0) setLastOutreachBatchAt(batchTs);
+    if (generated > 0) await setLastOutreachBatchAt(batchTs);
     return generated;
 }
 
@@ -386,7 +390,7 @@ export async function runDailyPipeline(send = true): Promise<PipelineResult> {
     logger.info(`  Fetched: ${collectStats.fetched}, New: ${collectStats.new}`);
 
     logger.info("Step 2: Generating outreach...");
-    const generated = generateOutreachForTopJobs();
+    const generated = await generateOutreachForTopJobs();
     logger.info(`  Generated ${generated} new outreach items`);
 
     let emailResult: DigestResult | { skipped: boolean } = { skipped: true };

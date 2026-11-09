@@ -1,8 +1,7 @@
-import { getDb, namedParams } from "./connection.js";
-import type { SQLQueryBindings } from "bun:sqlite";
+import { param, query, queryOne, type Executor } from "./connection.js";
 import { daysAgoIso, utcNowIso } from "../utils/models.js";
 
-// ── Row types (column names mirror the SQLite tables exactly) ─────────
+// ── Row types (column names mirror the PostgreSQL tables exactly) ──────
 
 export interface JobRow {
     id: string;
@@ -144,57 +143,86 @@ export type JobInsert = Pick<
     scored_profile_id?: number | null;
 };
 
-/** Upsert a job. Returns "new" or "updated" (last_seen refreshed). */
-export function insertJob(job: JobInsert): "new" | "updated" {
-    const d = getDb();
+/**
+ * Upsert a job. Returns "new" or "updated" (last_seen refreshed). Pass a
+ * transaction client as `exec` to batch many inserts on one connection.
+ */
+export async function insertJob(job: JobInsert, exec?: Executor): Promise<"new" | "updated"> {
     const now = utcNowIso();
-    const existing = d.prepare("SELECT id FROM jobs WHERE id = ?").get(job.id);
+    const existing = await queryOne<{ id: string }>(
+        "SELECT id FROM jobs WHERE id = $1",
+        [job.id],
+        exec,
+    );
     if (existing) {
-        d.prepare("UPDATE jobs SET last_seen = ? WHERE id = ?").run(now, job.id);
+        await query("UPDATE jobs SET last_seen = $1 WHERE id = $2", [now, job.id], exec);
         return "updated";
     }
-    d.prepare(
+    const params: unknown[] = [];
+    const values = [
+        job.id,
+        job.title,
+        job.company,
+        job.location,
+        job.description,
+        job.url,
+        job.source,
+        job.posted_date,
+        job.discovered_at,
+        job.tech_stack,
+        job.experience_level,
+        job.relevance_score,
+        job.status,
+        job.company_domain,
+        job.salary,
+        job.job_type,
+        job.india_friendly,
+        job.location_note,
+        now,
+        job.scored_profile_id ?? null,
+    ];
+    const placeholders = values.map((v) => param(params, v));
+    await query(
         `INSERT INTO jobs (id, title, company, location, description, url,
         source, posted_date, discovered_at, tech_stack, experience_level,
         relevance_score, status, company_domain, salary, job_type,
         india_friendly, location_note, last_seen, scored_profile_id)
-      VALUES (@id, @title, @company, @location, @description, @url,
-        @source, @posted_date, @discovered_at, @tech_stack, @experience_level,
-        @relevance_score, @status, @company_domain, @salary, @job_type,
-        @india_friendly, @location_note, @last_seen, @scored_profile_id)`,
-    ).run(namedParams({ ...job, last_seen: now, scored_profile_id: job.scored_profile_id ?? null }));
+      VALUES (${placeholders.join(", ")})`,
+        params,
+        exec,
+    );
     return "new";
 }
 
 /** Delete jobs not re-seen within `days`, protecting non-active statuses and marked jobs. */
-export function cleanupOldJobs(days = 14): number {
-    const d = getDb();
+export async function cleanupOldJobs(days = 14): Promise<number> {
     const cutoff = daysAgoIso(days);
-    const info = d
-        .prepare(
-            `DELETE FROM jobs
-        WHERE (last_seen < @cutoff OR last_seen = '' OR last_seen IS NULL)
+    const res = await query(
+        `DELETE FROM jobs
+        WHERE (last_seen < $1 OR last_seen = '' OR last_seen IS NULL)
           AND status IN ('new', 'reviewed', 'stale')
           AND (mark_for_email = 0 OR mark_for_email IS NULL)`,
-        )
-        .run(namedParams({ cutoff }));
-    return info.changes;
+        [cutoff],
+    );
+    return res.rowCount ?? 0;
 }
 
-export function toggleMarkForEmail(jobId: string): boolean {
-    const d = getDb();
-    const row = d.prepare("SELECT mark_for_email AS m FROM jobs WHERE id = ?").get(jobId) as
-        | { m: number | null }
-        | undefined;
+export async function toggleMarkForEmail(jobId: string): Promise<boolean> {
+    const row = await queryOne<{ m: number | null }>(
+        "SELECT mark_for_email AS m FROM jobs WHERE id = $1",
+        [jobId],
+    );
     const newState = row && row.m ? 0 : 1;
-    d.prepare("UPDATE jobs SET mark_for_email = ? WHERE id = ?").run(newState, jobId);
+    await query("UPDATE jobs SET mark_for_email = $1 WHERE id = $2", [newState, jobId]);
     return newState === 1;
 }
 
-export function getMarkedJobs(limit = 50): JobRow[] {
-    return getDb()
-        .prepare("SELECT * FROM jobs WHERE mark_for_email = 1 ORDER BY relevance_score DESC LIMIT ?")
-        .all(limit) as JobRow[];
+export async function getMarkedJobs(limit = 50): Promise<JobRow[]> {
+    const res = await query<JobRow>(
+        "SELECT * FROM jobs WHERE mark_for_email = 1 ORDER BY relevance_score DESC LIMIT $1",
+        [limit],
+    );
+    return res.rows;
 }
 
 export interface JobFilters {
@@ -211,62 +239,43 @@ export interface JobFilters {
     offset?: number;
 }
 
-export function getJobs(f: JobFilters = {}): JobRow[] {
-    const d = getDb();
-    const minScore = f.min_score ?? 0;
-    const limit = f.limit ?? 100;
-    const offset = f.offset ?? 0;
+export async function getJobs(f: JobFilters = {}): Promise<JobRow[]> {
+    const params: unknown[] = [];
+    const where: string[] = [`relevance_score >= ${param(params, f.min_score ?? 0)}`];
 
-    let query = "SELECT * FROM jobs WHERE relevance_score >= ?";
-    const params: SQLQueryBindings[] = [minScore];
-
-    if (f.source) {
-        query += " AND source LIKE ?";
-        params.push(`%${f.source}%`);
-    }
-    if (f.status) {
-        query += " AND status = ?";
-        params.push(f.status);
-    }
+    // ILIKE keeps the case-insensitive matching SQLite's LIKE gave us.
+    if (f.source) where.push(`source ILIKE ${param(params, `%${f.source}%`)}`);
+    if (f.status) where.push(`status = ${param(params, f.status)}`);
     if (f.search) {
-        query += " AND (title LIKE ? OR company LIKE ? OR description LIKE ?)";
-        const s = `%${f.search}%`;
-        params.push(s, s, s);
+        const s = param(params, `%${f.search}%`);
+        where.push(`(title ILIKE ${s} OR company ILIKE ${s} OR description ILIKE ${s})`);
     }
-    if (f.location) {
-        query += " AND location LIKE ?";
-        params.push(`%${f.location}%`);
-    }
-    if (f.tech) {
-        query += " AND tech_stack LIKE ?";
-        params.push(`%${f.tech}%`);
-    }
+    if (f.location) where.push(`location ILIKE ${param(params, `%${f.location}%`)}`);
+    if (f.tech) where.push(`tech_stack ILIKE ${param(params, `%${f.tech}%`)}`);
     if (f.india_friendly) {
-        if (f.india_friendly === "yes") query += " AND india_friendly = 'yes'";
-        else if (f.india_friendly === "no") query += " AND india_friendly = 'no'";
-        else if (f.india_friendly === "maybe") query += " AND india_friendly IN ('yes', 'maybe')";
+        if (f.india_friendly === "yes") where.push("india_friendly = 'yes'");
+        else if (f.india_friendly === "no") where.push("india_friendly = 'no'");
+        else if (f.india_friendly === "maybe") where.push("india_friendly IN ('yes', 'maybe')");
     }
-    if (f.company_domain) {
-        query += " AND company_domain = ?";
-        params.push(f.company_domain);
-    }
-    if (f.seen_after) {
-        query += " AND last_seen >= ?";
-        params.push(f.seen_after);
-    }
+    if (f.company_domain) where.push(`company_domain = ${param(params, f.company_domain)}`);
+    if (f.seen_after) where.push(`last_seen >= ${param(params, f.seen_after)}`);
 
-    query += " ORDER BY relevance_score DESC, discovered_at DESC LIMIT ? OFFSET ?";
-    params.push(limit, offset);
-
-    return d.prepare(query).all(...params) as JobRow[];
+    const limit = param(params, f.limit ?? 100);
+    const offset = param(params, f.offset ?? 0);
+    const res = await query<JobRow>(
+        `SELECT * FROM jobs WHERE ${where.join(" AND ")}
+         ORDER BY relevance_score DESC, discovered_at DESC LIMIT ${limit} OFFSET ${offset}`,
+        params,
+    );
+    return res.rows;
 }
 
-export function getJobById(jobId: string): JobRow | undefined {
-    return getDb().prepare("SELECT * FROM jobs WHERE id = ?").get(jobId) as JobRow | undefined;
+export async function getJobById(jobId: string): Promise<JobRow | undefined> {
+    return queryOne<JobRow>("SELECT * FROM jobs WHERE id = $1", [jobId]);
 }
 
-export function updateJobStatus(jobId: string, status: string): void {
-    getDb().prepare("UPDATE jobs SET status = ? WHERE id = ?").run(status, jobId);
+export async function updateJobStatus(jobId: string, status: string): Promise<void> {
+    await query("UPDATE jobs SET status = $1 WHERE id = $2", [status, jobId]);
 }
 
 export interface JobStats {
@@ -277,37 +286,35 @@ export interface JobStats {
     avg_score: number;
 }
 
-export function getStats(): JobStats {
-    const d = getDb();
-    const total = (d.prepare("SELECT COUNT(*) AS c FROM jobs").get() as { c: number }).c;
-    const bySource = d.prepare("SELECT source, COUNT(*) AS count FROM jobs GROUP BY source").all() as Array<{
-        source: string | null;
-        count: number;
-    }>;
-    const byStatus = d.prepare("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status").all() as Array<{
-        status: string | null;
-        count: number;
-    }>;
-    const byIndia = d
-        .prepare("SELECT india_friendly, COUNT(*) AS count FROM jobs GROUP BY india_friendly")
-        .all() as Array<{ india_friendly: string | null; count: number }>;
-    const avg = (d
-        .prepare("SELECT AVG(relevance_score) AS a FROM jobs WHERE relevance_score > 0")
-        .get() as { a: number | null }).a;
+export async function getStats(): Promise<JobStats> {
+    const totalRow = await queryOne<{ c: number }>("SELECT COUNT(*)::int AS c FROM jobs");
+    const bySource = await query<{ source: string | null; count: number }>(
+        "SELECT source, COUNT(*)::int AS count FROM jobs GROUP BY source",
+    );
+    const byStatus = await query<{ status: string | null; count: number }>(
+        "SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status",
+    );
+    const byIndia = await query<{ india_friendly: string | null; count: number }>(
+        "SELECT india_friendly, COUNT(*)::int AS count FROM jobs GROUP BY india_friendly",
+    );
+    const avgRow = await queryOne<{ a: number | null }>(
+        "SELECT AVG(relevance_score)::float8 AS a FROM jobs WHERE relevance_score > 0",
+    );
+    const avg = avgRow?.a ?? null;
     return {
-        total,
-        by_source: groupCount(bySource, "source"),
-        by_status: groupCount(byStatus, "status"),
-        by_india: groupCount(byIndia, "india_friendly"),
+        total: totalRow?.c ?? 0,
+        by_source: groupCount(bySource.rows, "source"),
+        by_status: groupCount(byStatus.rows, "status"),
+        by_india: groupCount(byIndia.rows, "india_friendly"),
         avg_score: avg ? Math.round(avg * 10) / 10 : 0,
     };
 }
 
-export function getSources(): string[] {
-    const rows = getDb().prepare("SELECT DISTINCT source FROM jobs ORDER BY source").all() as Array<{
-        source: string;
-    }>;
-    return rows.map((r) => r.source);
+export async function getSources(): Promise<string[]> {
+    const rows = await query<{ source: string }>(
+        "SELECT DISTINCT source FROM jobs WHERE source IS NOT NULL ORDER BY source",
+    );
+    return rows.rows.map((r) => r.source);
 }
 
 function groupCount(rows: Array<Record<string, unknown>>, key: string): Record<string, number> {
@@ -323,19 +330,43 @@ function groupCount(rows: Array<Record<string, unknown>>, key: string): Record<s
 
 export type CompanyInsert = CompanyRow;
 
-export function upsertCompany(c: CompanyInsert): boolean {
+export async function upsertCompany(c: CompanyInsert): Promise<boolean> {
     try {
-        getDb()
-            .prepare(
-                `INSERT OR REPLACE INTO companies
+        await query(
+            `INSERT INTO companies
             (id, name, domain, careers_url, ats_platform, ats_slug,
              founded_year, employee_count, tags, india_friendly,
              last_crawled, crawl_status, notes)
-          VALUES (@id, @name, @domain, @careers_url, @ats_platform, @ats_slug,
-             @founded_year, @employee_count, @tags, @india_friendly,
-             @last_crawled, @crawl_status, @notes)`,
-            )
-            .run(namedParams(c));
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             domain = EXCLUDED.domain,
+             careers_url = EXCLUDED.careers_url,
+             ats_platform = EXCLUDED.ats_platform,
+             ats_slug = EXCLUDED.ats_slug,
+             founded_year = EXCLUDED.founded_year,
+             employee_count = EXCLUDED.employee_count,
+             tags = EXCLUDED.tags,
+             india_friendly = EXCLUDED.india_friendly,
+             last_crawled = EXCLUDED.last_crawled,
+             crawl_status = EXCLUDED.crawl_status,
+             notes = EXCLUDED.notes`,
+            [
+                c.id,
+                c.name,
+                c.domain,
+                c.careers_url,
+                c.ats_platform,
+                c.ats_slug,
+                c.founded_year,
+                c.employee_count,
+                c.tags,
+                c.india_friendly,
+                c.last_crawled,
+                c.crawl_status,
+                c.notes,
+            ],
+        );
         return true;
     } catch {
         return false;
@@ -351,48 +382,43 @@ export interface CompanyFilters {
     offset?: number;
 }
 
-export function getCompanies(f: CompanyFilters = {}): CompanyRow[] {
-    const d = getDb();
-    let query = "SELECT * FROM companies WHERE 1=1";
-    const params: SQLQueryBindings[] = [];
-    if (f.ats_platform) {
-        query += " AND ats_platform = ?";
-        params.push(f.ats_platform);
-    }
-    if (f.crawl_status) {
-        query += " AND crawl_status = ?";
-        params.push(f.crawl_status);
-    }
-    if (f.india_friendly) {
-        query += " AND india_friendly = ?";
-        params.push(f.india_friendly);
-    }
+export async function getCompanies(f: CompanyFilters = {}): Promise<CompanyRow[]> {
+    const params: unknown[] = [];
+    const where: string[] = ["1=1"];
+    if (f.ats_platform) where.push(`ats_platform = ${param(params, f.ats_platform)}`);
+    if (f.crawl_status) where.push(`crawl_status = ${param(params, f.crawl_status)}`);
+    if (f.india_friendly) where.push(`india_friendly = ${param(params, f.india_friendly)}`);
     if (f.search) {
-        query += " AND (name LIKE ? OR domain LIKE ? OR tags LIKE ?)";
-        const s = `%${f.search}%`;
-        params.push(s, s, s);
+        const s = param(params, `%${f.search}%`);
+        where.push(`(name ILIKE ${s} OR domain ILIKE ${s} OR tags ILIKE ${s})`);
     }
-    query += " ORDER BY name ASC LIMIT ? OFFSET ?";
-    params.push(f.limit ?? 200, f.offset ?? 0);
-    return d.prepare(query).all(...params) as CompanyRow[];
+    const limit = param(params, f.limit ?? 200);
+    const offset = param(params, f.offset ?? 0);
+    const res = await query<CompanyRow>(
+        `SELECT * FROM companies WHERE ${where.join(" AND ")}
+         ORDER BY name ASC LIMIT ${limit} OFFSET ${offset}`,
+        params,
+    );
+    return res.rows;
 }
 
-export function getCompanyById(companyId: string): CompanyRow | undefined {
-    return getDb().prepare("SELECT * FROM companies WHERE id = ?").get(companyId) as
-        | CompanyRow
-        | undefined;
+export async function getCompanyById(companyId: string): Promise<CompanyRow | undefined> {
+    return queryOne<CompanyRow>("SELECT * FROM companies WHERE id = $1", [companyId]);
 }
 
-export function updateCompanyCrawlStatus(companyId: string, status: string, lastCrawled = ""): void {
-    const d = getDb();
+export async function updateCompanyCrawlStatus(
+    companyId: string,
+    status: string,
+    lastCrawled = "",
+): Promise<void> {
     if (lastCrawled) {
-        d.prepare("UPDATE companies SET crawl_status = ?, last_crawled = ? WHERE id = ?").run(
+        await query("UPDATE companies SET crawl_status = $1, last_crawled = $2 WHERE id = $3", [
             status,
             lastCrawled,
             companyId,
-        );
+        ]);
     } else {
-        d.prepare("UPDATE companies SET crawl_status = ? WHERE id = ?").run(status, companyId);
+        await query("UPDATE companies SET crawl_status = $1 WHERE id = $2", [status, companyId]);
     }
 }
 
@@ -403,41 +429,74 @@ export interface CompanyStats {
     by_india: Record<string, number>;
 }
 
-export function getCompanyStats(): CompanyStats {
-    const d = getDb();
-    const total = (d.prepare("SELECT COUNT(*) AS c FROM companies").get() as { c: number }).c;
-    const byPlatform = d
-        .prepare("SELECT ats_platform, COUNT(*) AS count FROM companies GROUP BY ats_platform")
-        .all() as Array<{ ats_platform: string | null; count: number }>;
-    const byStatus = d
-        .prepare("SELECT crawl_status, COUNT(*) AS count FROM companies GROUP BY crawl_status")
-        .all() as Array<{ crawl_status: string | null; count: number }>;
-    const byIndia = d
-        .prepare("SELECT india_friendly, COUNT(*) AS count FROM companies GROUP BY india_friendly")
-        .all() as Array<{ india_friendly: string | null; count: number }>;
+export async function getCompanyStats(): Promise<CompanyStats> {
+    const totalRow = await queryOne<{ c: number }>("SELECT COUNT(*)::int AS c FROM companies");
+    const byPlatform = await query<{ ats_platform: string | null; count: number }>(
+        "SELECT ats_platform, COUNT(*)::int AS count FROM companies GROUP BY ats_platform",
+    );
+    const byStatus = await query<{ crawl_status: string | null; count: number }>(
+        "SELECT crawl_status, COUNT(*)::int AS count FROM companies GROUP BY crawl_status",
+    );
+    const byIndia = await query<{ india_friendly: string | null; count: number }>(
+        "SELECT india_friendly, COUNT(*)::int AS count FROM companies GROUP BY india_friendly",
+    );
     return {
-        total,
-        by_platform: groupCount(byPlatform, "ats_platform"),
-        by_status: groupCount(byStatus, "crawl_status"),
-        by_india: groupCount(byIndia, "india_friendly"),
+        total: totalRow?.c ?? 0,
+        by_platform: groupCount(byPlatform.rows, "ats_platform"),
+        by_status: groupCount(byStatus.rows, "crawl_status"),
+        by_india: groupCount(byIndia.rows, "india_friendly"),
     };
 }
 
 // ── Outreach CRUD ─────────────────────────────────────────────────────
 
-export function insertOutreach(item: OutreachRow): boolean {
+export async function insertOutreach(item: OutreachRow): Promise<boolean> {
     try {
-        getDb()
-            .prepare(
-                `INSERT OR REPLACE INTO outreach
+        await query(
+            `INSERT INTO outreach
             (id, job_id, job_title, company, company_domain, contact_name,
              contact_position, contact_linkedin, dm_short, dm_long, status,
-             messaged_at, replied_at, followed_up_at, created_at, notes, profile_id)
-          VALUES (@id, @job_id, @job_title, @company, @company_domain, @contact_name,
-             @contact_position, @contact_linkedin, @dm_short, @dm_long, @status,
-             @messaged_at, @replied_at, @followed_up_at, @created_at, @notes, @profile_id)`,
-            )
-            .run(namedParams(item));
+             messaged_at, replied_at, followed_up_at, created_at, notes, emailed_at, profile_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          ON CONFLICT (id) DO UPDATE SET
+             job_id = EXCLUDED.job_id,
+             job_title = EXCLUDED.job_title,
+             company = EXCLUDED.company,
+             company_domain = EXCLUDED.company_domain,
+             contact_name = EXCLUDED.contact_name,
+             contact_position = EXCLUDED.contact_position,
+             contact_linkedin = EXCLUDED.contact_linkedin,
+             dm_short = EXCLUDED.dm_short,
+             dm_long = EXCLUDED.dm_long,
+             status = EXCLUDED.status,
+             messaged_at = EXCLUDED.messaged_at,
+             replied_at = EXCLUDED.replied_at,
+             followed_up_at = EXCLUDED.followed_up_at,
+             created_at = EXCLUDED.created_at,
+             notes = EXCLUDED.notes,
+             emailed_at = EXCLUDED.emailed_at,
+             profile_id = EXCLUDED.profile_id`,
+            [
+                item.id,
+                item.job_id,
+                item.job_title,
+                item.company,
+                item.company_domain,
+                item.contact_name,
+                item.contact_position,
+                item.contact_linkedin,
+                item.dm_short,
+                item.dm_long,
+                item.status,
+                item.messaged_at,
+                item.replied_at,
+                item.followed_up_at,
+                item.created_at,
+                item.notes,
+                item.emailed_at,
+                item.profile_id,
+            ],
+        );
         return true;
     } catch {
         return false;
@@ -452,204 +511,222 @@ export interface OutreachFilters {
     offset?: number;
 }
 
-export function getOutreach(f: OutreachFilters = {}): OutreachJoined[] {
-    const d = getDb();
-    let query = `
-    SELECT o.*, j.url as job_url, j.relevance_score, j.tech_stack,
-           j.location, j.salary, j.india_friendly
-    FROM outreach o
-    LEFT JOIN jobs j ON j.id = o.job_id
-    WHERE 1=1`;
-    const params: SQLQueryBindings[] = [];
-    if (f.status) {
-        query += " AND o.status = ?";
-        params.push(f.status);
-    }
+export async function getOutreach(f: OutreachFilters = {}): Promise<OutreachJoined[]> {
+    const params: unknown[] = [];
+    const where: string[] = ["1=1"];
+    if (f.status) where.push(`o.status = ${param(params, f.status)}`);
     if (f.search) {
-        query += " AND (o.company LIKE ? OR o.job_title LIKE ? OR o.contact_name LIKE ?)";
-        const s = `%${f.search}%`;
-        params.push(s, s, s);
+        const s = param(params, `%${f.search}%`);
+        where.push(`(o.company ILIKE ${s} OR o.job_title ILIKE ${s} OR o.contact_name ILIKE ${s})`);
     }
     if (f.batch === "new" || f.batch === "old") {
-        const batchAt = getLastOutreachBatchAt();
+        const batchAt = await getLastOutreachBatchAt();
         if (batchAt) {
             const op = f.batch === "new" ? ">=" : "<";
-            query += ` AND o.created_at ${op} ?`;
-            params.push(batchAt);
+            where.push(`o.created_at ${op} ${param(params, batchAt)}`);
         } else if (f.batch === "new") {
-            query += " AND 0";
+            where.push("FALSE");
         }
     }
-    query += " ORDER BY o.created_at DESC, j.relevance_score DESC LIMIT ? OFFSET ?";
-    params.push(f.limit ?? 100, f.offset ?? 0);
-    return d.prepare(query).all(...params) as OutreachJoined[];
+    const limit = param(params, f.limit ?? 100);
+    const offset = param(params, f.offset ?? 0);
+    const res = await query<OutreachJoined>(
+        `SELECT o.*, j.url as job_url, j.relevance_score, j.tech_stack,
+                j.location, j.salary, j.india_friendly
+         FROM outreach o
+         LEFT JOIN jobs j ON j.id = o.job_id
+         WHERE ${where.join(" AND ")}
+         ORDER BY o.created_at DESC, j.relevance_score DESC LIMIT ${limit} OFFSET ${offset}`,
+        params,
+    );
+    return res.rows;
 }
 
-export function deleteOutreachBulk(ids: string[]): number {
+export async function deleteOutreachBulk(ids: string[]): Promise<number> {
     if (!ids.length) return 0;
-    const placeholders = ids.map(() => "?").join(",");
-    const info = getDb()
-        .prepare(`DELETE FROM outreach WHERE id IN (${placeholders})`)
-        .run(...ids);
-    return info.changes;
+    const res = await query("DELETE FROM outreach WHERE id = ANY($1::text[])", [ids]);
+    return res.rowCount ?? 0;
 }
 
-export function deleteAllOutreach(): number {
-    return getDb().prepare("DELETE FROM outreach").run().changes;
+export async function deleteAllOutreach(): Promise<number> {
+    const res = await query("DELETE FROM outreach");
+    return res.rowCount ?? 0;
 }
 
-export function setLastOutreachBatchAt(ts: string): void {
-    getDb()
-        .prepare(
-            "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('last_outreach_batch_at', ?, ?)",
-        )
-        .run(ts, ts);
+export async function setLastOutreachBatchAt(ts: string): Promise<void> {
+    await query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('last_outreach_batch_at', $1, $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+        [ts],
+    );
 }
 
-export function getLastOutreachBatchAt(): string | null {
-    const row = getDb()
-        .prepare("SELECT value FROM app_settings WHERE key = 'last_outreach_batch_at'")
-        .get() as { value: string } | undefined;
+export async function getLastOutreachBatchAt(): Promise<string | null> {
+    const row = await queryOne<{ value: string }>(
+        "SELECT value FROM app_settings WHERE key = 'last_outreach_batch_at'",
+    );
     return row ? row.value : null;
 }
 
-export function updateOutreachStatus(outreachId: string, status: string, field?: string): void {
-    const d = getDb();
+export async function updateOutreachStatus(
+    outreachId: string,
+    status: string,
+    field?: string,
+): Promise<void> {
     const ts = utcNowIso();
     if (field === "messaged") {
-        d.prepare("UPDATE outreach SET status=?, messaged_at=? WHERE id=?").run(status, ts, outreachId);
+        await query("UPDATE outreach SET status=$1, messaged_at=$2 WHERE id=$3", [
+            status,
+            ts,
+            outreachId,
+        ]);
     } else if (field === "replied") {
-        d.prepare("UPDATE outreach SET status=?, replied_at=? WHERE id=?").run(status, ts, outreachId);
+        await query("UPDATE outreach SET status=$1, replied_at=$2 WHERE id=$3", [
+            status,
+            ts,
+            outreachId,
+        ]);
     } else if (field === "followed_up") {
-        d.prepare("UPDATE outreach SET status=?, followed_up_at=? WHERE id=?").run(status, ts, outreachId);
+        await query("UPDATE outreach SET status=$1, followed_up_at=$2 WHERE id=$3", [
+            status,
+            ts,
+            outreachId,
+        ]);
     } else {
-        d.prepare("UPDATE outreach SET status=? WHERE id=?").run(status, outreachId);
+        await query("UPDATE outreach SET status=$1 WHERE id=$2", [status, outreachId]);
     }
 }
 
-export function updateOutreachNotes(outreachId: string, notes: string): void {
-    getDb().prepare("UPDATE outreach SET notes = ? WHERE id = ?").run(notes, outreachId);
+export async function updateOutreachNotes(outreachId: string, notes: string): Promise<void> {
+    await query("UPDATE outreach SET notes = $1 WHERE id = $2", [notes, outreachId]);
 }
 
-export function outreachExistsForJob(jobId: string): boolean {
-    return !!getDb().prepare("SELECT id FROM outreach WHERE job_id = ? LIMIT 1").get(jobId);
+export async function outreachExistsForJob(jobId: string): Promise<boolean> {
+    const row = await queryOne<{ id: string }>(
+        "SELECT id FROM outreach WHERE job_id = $1 LIMIT 1",
+        [jobId],
+    );
+    return Boolean(row);
 }
 
-export function getOutreachStats(): { total: number; by_status: Record<string, number> } {
-    const d = getDb();
-    const total = (d.prepare("SELECT COUNT(*) AS c FROM outreach").get() as { c: number }).c;
-    const byStatus = d.prepare("SELECT status, COUNT(*) AS count FROM outreach GROUP BY status").all() as Array<{
-        status: string | null;
-        count: number;
-    }>;
-    return { total, by_status: groupCount(byStatus, "status") };
+export async function getOutreachStats(): Promise<{
+    total: number;
+    by_status: Record<string, number>;
+}> {
+    const totalRow = await queryOne<{ c: number }>("SELECT COUNT(*)::int AS c FROM outreach");
+    const byStatus = await query<{ status: string | null; count: number }>(
+        "SELECT status, COUNT(*)::int AS count FROM outreach GROUP BY status",
+    );
+    return { total: totalRow?.c ?? 0, by_status: groupCount(byStatus.rows, "status") };
 }
 
-export function getUnemailedOutreach(limit = 15, onlyMarked = false): OutreachUnemailed[] {
-    const d = getDb();
+export async function getUnemailedOutreach(
+    limit = 15,
+    onlyMarked = false,
+): Promise<OutreachUnemailed[]> {
     let where = "(o.emailed_at = '' OR o.emailed_at IS NULL) AND o.status = 'pending'";
     if (onlyMarked) where += " AND j.mark_for_email = 1";
-    return d
-        .prepare(
-            `SELECT o.*, j.relevance_score, j.url AS job_url, j.description AS job_description,
+    const res = await query<OutreachUnemailed>(
+        `SELECT o.*, j.relevance_score, j.url AS job_url, j.description AS job_description,
               j.tech_stack, j.salary, j.location, j.posted_date, j.india_friendly,
               j.mark_for_email
         FROM outreach o
         LEFT JOIN jobs j ON j.id = o.job_id
         WHERE ${where}
         ORDER BY j.mark_for_email DESC, j.relevance_score DESC, o.created_at DESC
-        LIMIT ?`,
-        )
-        .all(limit) as OutreachUnemailed[];
-}
-
-export function markOutreachEmailed(outreachIds: string[]): void {
-    const d = getDb();
-    const ts = utcNowIso();
-    const stmt = d.prepare(
-        `UPDATE outreach SET emailed_at = ?,
-        status = CASE WHEN status = 'pending' THEN 'emailed' ELSE status END
-      WHERE id = ?`,
+        LIMIT $1`,
+        [limit],
     );
-    const tx = d.transaction((ids: string[]) => {
-        for (const oid of ids) stmt.run(ts, oid);
-    });
-    tx(outreachIds);
+    return res.rows;
 }
 
-export function logEmail(
+export async function markOutreachEmailed(outreachIds: string[]): Promise<void> {
+    if (!outreachIds.length) return;
+    await query(
+        `UPDATE outreach SET emailed_at = $1,
+        status = CASE WHEN status = 'pending' THEN 'emailed' ELSE status END
+      WHERE id = ANY($2::text[])`,
+        [utcNowIso(), outreachIds],
+    );
+}
+
+export async function logEmail(
     recipient: string,
     subject: string,
     itemsCount: number,
     outreachIds: string[],
     status = "sent",
     error = "",
-): void {
-    getDb()
-        .prepare(
-            `INSERT INTO email_log (sent_at, recipient, subject, items_count, outreach_ids, status, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(utcNowIso(), recipient, subject, itemsCount, outreachIds.join(","), status, error);
+): Promise<void> {
+    await query(
+        `INSERT INTO email_log (sent_at, recipient, subject, items_count, outreach_ids, status, error)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [utcNowIso(), recipient, subject, itemsCount, outreachIds.join(","), status, error],
+    );
 }
 
-export function getEmailLogs(limit = 30): EmailLogRow[] {
-    return getDb()
-        .prepare("SELECT * FROM email_log ORDER BY sent_at DESC LIMIT ?")
-        .all(limit) as EmailLogRow[];
+export async function getEmailLogs(limit = 30): Promise<EmailLogRow[]> {
+    const res = await query<EmailLogRow>(
+        "SELECT * FROM email_log ORDER BY sent_at DESC LIMIT $1",
+        [limit],
+    );
+    return res.rows;
 }
 
 // ── Search queries (legacy table) ─────────────────────────────────────
 
-export function getSearchQueries(enabledOnly = false): SearchQueryRow[] {
-    const d = getDb();
-    if (enabledOnly) {
-        return d.prepare("SELECT * FROM search_queries WHERE enabled = 1 ORDER BY id").all() as SearchQueryRow[];
-    }
-    return d.prepare("SELECT * FROM search_queries ORDER BY id").all() as SearchQueryRow[];
+export async function getSearchQueries(enabledOnly = false): Promise<SearchQueryRow[]> {
+    const where = enabledOnly ? "WHERE enabled = 1 " : "";
+    const res = await query<SearchQueryRow>(`SELECT * FROM search_queries ${where}ORDER BY id`);
+    return res.rows;
 }
 
-export function addSearchQuery(
+export async function addSearchQuery(
     query: string,
     country = "IN",
     datePosted = "3days",
     remoteJobsOnly = false,
-): number {
-    const info = getDb()
-        .prepare(
-            "INSERT INTO search_queries (query, country, date_posted, remote_jobs_only, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-        )
-        .run(query, country, datePosted, remoteJobsOnly ? 1 : 0, utcNowIso());
-    return Number(info.lastInsertRowid);
+): Promise<number> {
+    const row = await queryOne<{ id: number }>(
+        `INSERT INTO search_queries (query, country, date_posted, remote_jobs_only, enabled, created_at)
+         VALUES ($1, $2, $3, $4, 1, $5) RETURNING id`,
+        [query, country, datePosted, remoteJobsOnly ? 1 : 0, utcNowIso()],
+    );
+    return row?.id ?? 0;
 }
 
-export function deleteSearchQuery(qid: number): void {
-    getDb().prepare("DELETE FROM search_queries WHERE id = ?").run(qid);
+export async function deleteSearchQuery(qid: number): Promise<void> {
+    await query("DELETE FROM search_queries WHERE id = $1", [qid]);
 }
 
 // ── API usage tracking ────────────────────────────────────────────────
 
-export function logApiCall(apiName: string, success = true, notes = ""): void {
-    getDb()
-        .prepare("INSERT INTO api_usage (api_name, called_at, success, notes) VALUES (?, ?, ?, ?)")
-        .run(apiName, utcNowIso(), success ? 1 : 0, notes);
+export async function logApiCall(apiName: string, success = true, notes = ""): Promise<void> {
+    await query(
+        "INSERT INTO api_usage (api_name, called_at, success, notes) VALUES ($1, $2, $3, $4)",
+        [apiName, utcNowIso(), success ? 1 : 0, notes],
+    );
 }
 
-export function getApiUsage(apiName: string): { month: number; today: number; total: number } {
-    const d = getDb();
+export async function getApiUsage(
+    apiName: string,
+): Promise<{ month: number; today: number; total: number }> {
     const now = new Date();
     const y = now.getUTCFullYear();
     const m = now.getUTCMonth();
     const monthStart = new Date(Date.UTC(y, m, 1)).toISOString().replace("Z", "");
     const todayStart = new Date(Date.UTC(y, m, now.getUTCDate())).toISOString().replace("Z", "");
-    const month = (d
-        .prepare("SELECT COUNT(*) AS c FROM api_usage WHERE api_name=? AND called_at >= ?")
-        .get(apiName, monthStart) as { c: number }).c;
-    const today = (d
-        .prepare("SELECT COUNT(*) AS c FROM api_usage WHERE api_name=? AND called_at >= ?")
-        .get(apiName, todayStart) as { c: number }).c;
-    const total = (d
-        .prepare("SELECT COUNT(*) AS c FROM api_usage WHERE api_name=?")
-        .get(apiName) as { c: number }).c;
-    return { month, today, total };
+    const month = await queryOne<{ c: number }>(
+        "SELECT COUNT(*)::int AS c FROM api_usage WHERE api_name=$1 AND called_at >= $2",
+        [apiName, monthStart],
+    );
+    const today = await queryOne<{ c: number }>(
+        "SELECT COUNT(*)::int AS c FROM api_usage WHERE api_name=$1 AND called_at >= $2",
+        [apiName, todayStart],
+    );
+    const total = await queryOne<{ c: number }>(
+        "SELECT COUNT(*)::int AS c FROM api_usage WHERE api_name=$1",
+        [apiName],
+    );
+    return { month: month?.c ?? 0, today: today?.c ?? 0, total: total?.c ?? 0 };
 }

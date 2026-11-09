@@ -1,7 +1,8 @@
-import type { Response } from "express";
+import type { NextFunction, Request, RequestHandler, Response } from "express";
 
-// Small query-param coercion helpers (defaults + min/max bounds) and an error
-// responder that returns a {detail} JSON body.
+// Small query-param coercion helpers (defaults + min/max bounds), an error
+// responder that returns a {detail} JSON body, and the async wrapper Express 4
+// needs because it does not catch rejected promises itself.
 
 export function toInt(raw: unknown, def: number, min?: number, max?: number): number {
     let n = def;
@@ -33,4 +34,16 @@ export function toStr(raw: unknown): string | null {
 /** Respond with a {detail} JSON error body. */
 export function detail(res: Response, status: number, msg: string): Response {
     return res.status(status).json({ detail: msg });
+}
+
+/**
+ * Express 4 does not forward rejected promises to the error handler, so every
+ * async route handler is wrapped: a rejection becomes `next(err)`.
+ */
+export function asyncHandler(
+    fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+): RequestHandler {
+    return (req, res, next) => {
+        fn(req, res, next).catch(next);
+    };
 }

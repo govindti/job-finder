@@ -18,7 +18,7 @@ export class HTMLCareerSource implements JobSource {
         const url = this.company.careers_url;
         if (!url) return [];
 
-        const titleKeywords = getActiveProfile().search.title_keywords_positive ?? [];
+        const titleKeywords = (await getActiveProfile()).search.title_keywords_positive ?? [];
 
         const resp = await httpFetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)" },

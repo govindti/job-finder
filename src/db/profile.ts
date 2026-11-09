@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import type { SQLQueryBindings } from "bun:sqlite";
-import { getDb } from "../db/connection.js";
+import { query, queryOne } from "../db/connection.js";
 import { utcNowIso } from "../utils/models.js";
 import { env } from "../config/env.js";
 import * as settings from "../config/settings.js";
@@ -123,6 +122,9 @@ export function validateConfig(config: unknown): ProfileConfig {
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────
+// Read-through only: the snapshot is filled from PostgreSQL on demand and
+// dropped by every profile mutation, so a stale config cannot outlive the
+// write that changed it.
 
 const activeCache: { id: number | null; name: string | null; config: ProfileConfig | null } = {
   id: null,
@@ -154,34 +156,40 @@ interface ProfileDbRow {
   source: string;
 }
 
-function readActiveProfileId(): number | null {
-  const d = getDb();
-  const row = d
-    .prepare("SELECT value FROM app_settings WHERE key = 'active_profile_id'")
-    .get() as { value: string } | undefined;
+async function readActiveProfileId(): Promise<number | null> {
+  const row = await queryOne<{ value: string }>(
+    "SELECT value FROM app_settings WHERE key = 'active_profile_id'",
+  );
   if (!row) return null;
   const n = Number.parseInt(row.value, 10);
   return Number.isNaN(n) ? null : n;
 }
 
-function readProfileRow(pid: number): ProfileDbRow | undefined {
-  return getDb().prepare("SELECT * FROM profiles WHERE id = ?").get(pid) as
-    | ProfileDbRow
-    | undefined;
+function readProfileRow(pid: number): Promise<ProfileDbRow | undefined> {
+  return queryOne<ProfileDbRow>("SELECT * FROM profiles WHERE id = $1", [pid]);
 }
 
 // ── Public API ────────────────────────────────────────────────────────
 
-export function getActiveProfile(): ActiveProfile {
+export async function getActiveProfile(): Promise<ActiveProfile> {
   if (activeCache.config !== null) {
     return { ...activeCache.config, _id: activeCache.id, _name: activeCache.name };
   }
+  return refreshActiveProfile();
+}
 
-  const pid = readActiveProfileId();
+/**
+ * Drop the cached snapshot and reload the active profile. Called once at
+ * bootstrap and after every profile write.
+ */
+export async function refreshActiveProfile(): Promise<ActiveProfile> {
+  invalidateCache();
+
+  const pid = await readActiveProfileId();
   if (pid === null) {
     return { ...defaultConfig(), _id: null, _name: "(none)" };
   }
-  const row = readProfileRow(pid);
+  const row = await readProfileRow(pid);
   if (!row) {
     return { ...defaultConfig(), _id: null, _name: "(none)" };
   }
@@ -200,12 +208,12 @@ export interface ProfileSummary {
   is_active: boolean;
 }
 
-export function listProfiles(): ProfileSummary[] {
-  const activeId = readActiveProfileId();
-  const rows = getDb()
-    .prepare("SELECT id, name, description, source, created_at, updated_at FROM profiles ORDER BY id")
-    .all() as Array<Omit<ProfileSummary, "is_active">>;
-  return rows.map((r) => ({ ...r, is_active: r.id === activeId }));
+export async function listProfiles(): Promise<ProfileSummary[]> {
+  const activeId = await readActiveProfileId();
+  const res = await query<Omit<ProfileSummary, "is_active">>(
+    "SELECT id, name, description, source, created_at, updated_at FROM profiles ORDER BY id",
+  );
+  return res.rows.map((r) => ({ ...r, is_active: r.id === activeId }));
 }
 
 export interface ProfileDetail {
@@ -218,8 +226,8 @@ export interface ProfileDetail {
   config: ProfileConfig;
 }
 
-export function getProfile(pid: number): ProfileDetail | undefined {
-  const row = readProfileRow(pid);
+export async function getProfile(pid: number): Promise<ProfileDetail | undefined> {
+  const row = await readProfileRow(pid);
   if (!row) return undefined;
   return {
     id: row.id,
@@ -232,65 +240,70 @@ export function getProfile(pid: number): ProfileDetail | undefined {
   };
 }
 
-export function createProfile(name: string, config: unknown, description = "", source = "custom"): number {
+export async function createProfile(
+  name: string,
+  config: unknown,
+  description = "",
+  source = "custom",
+): Promise<number> {
   const ts = utcNowIso();
   const cfg = validateConfig(config);
-  const info = getDb()
-    .prepare(
-      "INSERT INTO profiles (name, description, config_json, created_at, updated_at, source) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .run(name, description, JSON.stringify(cfg), ts, ts, source);
-  return Number(info.lastInsertRowid);
+  const row = await queryOne<{ id: number }>(
+    `INSERT INTO profiles (name, description, config_json, created_at, updated_at, source)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [name, description, JSON.stringify(cfg), ts, ts, source],
+  );
+  if (!row) throw new Error("Failed to insert profile");
+  return row.id;
 }
 
-export function updateProfile(
+export async function updateProfile(
   pid: number,
   opts: { config?: unknown; name?: string; description?: string },
-): void {
-  const d = getDb();
+): Promise<void> {
   const updates: string[] = [];
-  const params: SQLQueryBindings[] = [];
+  const params: unknown[] = [];
   if (opts.config !== undefined) {
-    updates.push("config_json = ?");
     params.push(JSON.stringify(validateConfig(opts.config)));
+    updates.push(`config_json = $${params.length}`);
   }
   if (opts.name !== undefined) {
-    updates.push("name = ?");
     params.push(opts.name);
+    updates.push(`name = $${params.length}`);
   }
   if (opts.description !== undefined) {
-    updates.push("description = ?");
     params.push(opts.description);
+    updates.push(`description = $${params.length}`);
   }
   if (!updates.length) return;
-  updates.push("updated_at = ?");
   params.push(utcNowIso());
+  updates.push(`updated_at = $${params.length}`);
   params.push(pid);
-  d.prepare(`UPDATE profiles SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+  await query(`UPDATE profiles SET ${updates.join(", ")} WHERE id = $${params.length}`, params);
 
-  if (readActiveProfileId() === pid) invalidateCache();
+  if ((await readActiveProfileId()) === pid) await refreshActiveProfile();
 }
 
-export function activateProfile(pid: number): void {
-  const row = readProfileRow(pid);
+export async function activateProfile(pid: number): Promise<void> {
+  const row = await readProfileRow(pid);
   if (!row) throw new Error(`Profile ${pid} not found`);
-  getDb()
-    .prepare(
-      "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('active_profile_id', ?, ?)",
-    )
-    .run(String(pid), utcNowIso());
-  invalidateCache();
+  await query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('active_profile_id', $1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+    [String(pid), utcNowIso()],
+  );
+  await refreshActiveProfile();
 }
 
-export function deleteProfile(pid: number): void {
-  if (readActiveProfileId() === pid) {
+export async function deleteProfile(pid: number): Promise<void> {
+  if ((await readActiveProfileId()) === pid) {
     throw new Error("Cannot delete the active profile. Activate another first.");
   }
-  getDb().prepare("DELETE FROM profiles WHERE id = ?").run(pid);
+  await query("DELETE FROM profiles WHERE id = $1", [pid]);
 }
 
-export function duplicateProfile(pid: number, newName?: string): number {
-  const row = readProfileRow(pid);
+export async function duplicateProfile(pid: number, newName?: string): Promise<number> {
+  const row = await readProfileRow(pid);
   if (!row) throw new Error(`Profile ${pid} not found`);
   const name = newName || `${row.name} (copy)`;
   return createProfile(name, JSON.parse(row.config_json), row.description, "custom");
@@ -334,7 +347,11 @@ function readPresetMeta(filePath: string): PresetMeta | null {
   };
 }
 
-export function importPreset(slug: string, activate = false, overwrite = false): number {
+export async function importPreset(
+  slug: string,
+  activate = false,
+  overwrite = false,
+): Promise<number> {
   const filePath = path.join(env.PROFILES_DIR, `${slug}.yaml`);
   if (!fs.existsSync(filePath)) throw new Error(`Preset not found: ${filePath}`);
   const data = (YAML.parse(fs.readFileSync(filePath, "utf-8")) as Rec) ?? {};
@@ -347,41 +364,35 @@ export function importPreset(slug: string, activate = false, overwrite = false):
   }
   const cfg = validateConfig(config);
 
-  const d = getDb();
-  const existing = d.prepare("SELECT id FROM profiles WHERE name = ?").get(name) as
-    | { id: number }
-    | undefined;
+  const existing = await queryOne<{ id: number }>("SELECT id FROM profiles WHERE name = $1", [
+    name,
+  ]);
   const ts = utcNowIso();
   let pid: number;
 
   if (existing && overwrite) {
     pid = existing.id;
-    d.prepare(
-      "UPDATE profiles SET description = ?, config_json = ?, updated_at = ?, source = ? WHERE id = ?",
-    ).run(description, JSON.stringify(cfg), ts, `preset:${slug}`, existing.id);
-  } else if (existing) {
-    const newName = `${name} (imported ${ts.slice(0, 10)})`;
-    const info = d
-      .prepare(
-        "INSERT INTO profiles (name, description, config_json, created_at, updated_at, source) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(newName, description, JSON.stringify(cfg), ts, ts, `preset:${slug}`);
-    pid = Number(info.lastInsertRowid);
+    await query(
+      "UPDATE profiles SET description = $1, config_json = $2, updated_at = $3, source = $4 WHERE id = $5",
+      [description, JSON.stringify(cfg), ts, `preset:${slug}`, existing.id],
+    );
   } else {
-    const info = d
-      .prepare(
-        "INSERT INTO profiles (name, description, config_json, created_at, updated_at, source) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(name, description, JSON.stringify(cfg), ts, ts, `preset:${slug}`);
-    pid = Number(info.lastInsertRowid);
+    const newName = existing ? `${name} (imported ${ts.slice(0, 10)})` : name;
+    const row = await queryOne<{ id: number }>(
+      `INSERT INTO profiles (name, description, config_json, created_at, updated_at, source)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [newName, description, JSON.stringify(cfg), ts, ts, `preset:${slug}`],
+    );
+    if (!row) throw new Error(`Failed to import preset ${slug}`);
+    pid = row.id;
   }
 
-  if (activate) activateProfile(pid);
+  if (activate) await activateProfile(pid);
   return pid;
 }
 
-export function exportProfile(pid: number): string {
-  const row = readProfileRow(pid);
+export async function exportProfile(pid: number): Promise<string> {
+  const row = await readProfileRow(pid);
   if (!row) throw new Error(`Profile ${pid} not found`);
   const config = validateConfig(JSON.parse(row.config_json));
   const out = { name: row.name, description: row.description, ...config };
@@ -438,27 +449,30 @@ function legacyProfileFromSettings(): ProfileConfig {
 }
 
 /** Idempotent: seed "Backend Python (legacy)" + activate when profiles is empty. */
-export function ensureFirstRunSeed(): number | null {
-  const d = getDb();
-  const count = (d.prepare("SELECT COUNT(*) AS c FROM profiles").get() as { c: number }).c;
-  if (count > 0) return null;
+export async function ensureFirstRunSeed(): Promise<number | null> {
+  const countRow = await queryOne<{ c: number }>("SELECT COUNT(*)::int AS c FROM profiles");
+  if ((countRow?.c ?? 0) > 0) return null;
   const ts = utcNowIso();
   const cfg = legacyProfileFromSettings();
-  const info = d
-    .prepare(
-      "INSERT INTO profiles (name, description, config_json, created_at, updated_at, source) VALUES (?, ?, ?, ?, ?, 'legacy')",
-    )
-    .run(
+  const row = await queryOne<{ id: number }>(
+    `INSERT INTO profiles (name, description, config_json, created_at, updated_at, source)
+     VALUES ($1, $2, $3, $4, $5, 'legacy') RETURNING id`,
+    [
       "Backend Python (legacy)",
       "Seeded from pre-profile hardcoded settings. Edit or switch to another preset.",
       JSON.stringify(cfg),
       ts,
       ts,
-    );
-  const pid = Number(info.lastInsertRowid);
-  d.prepare(
-    "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('active_profile_id', ?, ?)",
-  ).run(String(pid), ts);
+    ],
+  );
+  if (!row) throw new Error("Failed to seed the legacy profile");
+  const pid = row.id;
+  await query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('active_profile_id', $1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+    [String(pid), ts],
+  );
+  invalidateCache();
   return pid;
 }
 
@@ -468,16 +482,16 @@ export interface ActiveProfileQuery extends JsearchQuery {
   id: number;
 }
 
-function loadActiveProfileConfig(): { pid: number | null; cfg: ProfileConfig } {
-  const pid = readActiveProfileId();
+async function loadActiveProfileConfig(): Promise<{ pid: number | null; cfg: ProfileConfig }> {
+  const pid = await readActiveProfileId();
   if (pid === null) return { pid: null, cfg: defaultConfig() };
-  const row = readProfileRow(pid);
+  const row = await readProfileRow(pid);
   if (!row) return { pid: null, cfg: defaultConfig() };
   return { pid, cfg: validateConfig(JSON.parse(row.config_json)) };
 }
 
-export function getActiveProfileQueries(): ActiveProfileQuery[] {
-  const { cfg } = loadActiveProfileConfig();
+export async function getActiveProfileQueries(): Promise<ActiveProfileQuery[]> {
+  const { cfg } = await loadActiveProfileConfig();
   const raw = cfg.search.jsearch_default_queries ?? [];
   return raw.map((q, idx) => ({
     id: idx,
@@ -489,26 +503,26 @@ export function getActiveProfileQueries(): ActiveProfileQuery[] {
   }));
 }
 
-export function addActiveProfileQuery(
+export async function addActiveProfileQuery(
   query: string,
   country = "IN",
   datePosted = "3days",
   remoteJobsOnly = false,
-): number {
-  const { pid, cfg } = loadActiveProfileConfig();
+): Promise<number> {
+  const { pid, cfg } = await loadActiveProfileConfig();
   if (pid === null) throw new Error("No active profile");
   const queries = [...(cfg.search.jsearch_default_queries ?? [])];
   queries.push({ query, country, date_posted: datePosted, remote_jobs_only: remoteJobsOnly, enabled: true });
   cfg.search.jsearch_default_queries = queries;
-  updateProfile(pid, { config: cfg });
+  await updateProfile(pid, { config: cfg });
   return queries.length - 1;
 }
 
-export function updateActiveProfileQuery(
+export async function updateActiveProfileQuery(
   qid: number,
   fields: Partial<Pick<JsearchQuery, "query" | "country" | "date_posted" | "remote_jobs_only" | "enabled">>,
-): void {
-  const { pid, cfg } = loadActiveProfileConfig();
+): Promise<void> {
+  const { pid, cfg } = await loadActiveProfileConfig();
   if (pid === null) throw new Error("No active profile");
   const queries = [...(cfg.search.jsearch_default_queries ?? [])];
   const target = queries[qid];
@@ -519,15 +533,15 @@ export function updateActiveProfileQuery(
     }
   }
   cfg.search.jsearch_default_queries = queries;
-  updateProfile(pid, { config: cfg });
+  await updateProfile(pid, { config: cfg });
 }
 
-export function deleteActiveProfileQuery(qid: number): void {
-  const { pid, cfg } = loadActiveProfileConfig();
+export async function deleteActiveProfileQuery(qid: number): Promise<void> {
+  const { pid, cfg } = await loadActiveProfileConfig();
   if (pid === null) throw new Error("No active profile");
   const queries = [...(cfg.search.jsearch_default_queries ?? [])];
   if (qid < 0 || qid >= queries.length) throw new Error(`Query index ${qid} out of range`);
   queries.splice(qid, 1);
   cfg.search.jsearch_default_queries = queries;
-  updateProfile(pid, { config: cfg });
+  await updateProfile(pid, { config: cfg });
 }

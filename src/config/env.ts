@@ -5,7 +5,7 @@ import path from "node:path";
 
 // Repo layout: env.ts lives in job-finder/src/config/, so:
 //   - project root for job-finder is three levels up (src/config -> src -> job-finder)
-//   - DB sits at job-finder/jobs.db at the project root
+//   - the legacy SQLite file sits at job-finder/jobs.db (import source only)
 export const JOB_FINDER_ROOT = path.resolve(import.meta.dir, "..", "..");
 
 function envInt(name: string, fallback: number): number {
@@ -20,8 +20,23 @@ function envStr(name: string, fallback = ""): string {
     return raw === undefined ? fallback : raw;
 }
 
+function envBool(name: string): boolean | null {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === "") return null;
+    return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
 export const env = {
-    DB_PATH: path.join(JOB_FINDER_ROOT, "jobs.db"),
+    // PostgreSQL (Neon, Supabase, or any local server) — single connection string.
+    DATABASE_URL: envStr("DATABASE_URL"),
+    // null = auto-detect (TLS for hosted providers, plain for localhost).
+    PG_SSL: envBool("PG_SSL"),
+    PG_POOL_MAX: envInt("PG_POOL_MAX", 10),
+    PG_CONNECT_TIMEOUT_MS: envInt("PG_CONNECT_TIMEOUT_MS", 10_000),
+
+    // Legacy SQLite file — only read by scripts/import-sqlite.ts.
+    LEGACY_DB_PATH: envStr("LEGACY_DB_PATH") || path.join(JOB_FINDER_ROOT, "jobs.db"),
+
     PROFILES_DIR: path.join(JOB_FINDER_ROOT, "profiles"),
     PUBLIC_DIR: path.join(JOB_FINDER_ROOT, "public"),
 

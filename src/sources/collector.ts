@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { getActiveProfile } from "../db/profile.js";
 import { cleanupOldJobs, getCompanies, insertJob, updateCompanyCrawlStatus, type CompanyRow } from "../db/repo.js";
+import { withTransaction } from "../db/connection.js";
 import { scoreJob } from "../scoring/scorer.js";
 import { extractDomain, jobFingerprint, utcNowIso, type Job } from "../utils/models.js";
 import type { ActiveProfile } from "../schemas/profile.js";
@@ -44,11 +45,11 @@ function newStats(): CollectionStats {
 }
 
 /** Build Track A sources fresh each run so JSearch uses the current profile queries. */
-function buildJobBoardSources(): JobSource[] {
+async function buildJobBoardSources(): Promise<JobSource[]> {
     const sources: JobSource[] = [new RemotiveSource(), new RemoteOKSource(), new ArbeitnowSource()];
 
     if (env.RAPIDAPI_KEY) {
-        const profile = getActiveProfile();
+        const profile = await getActiveProfile();
         const profileQueries = profile.search.jsearch_default_queries ?? [];
         const queries: JSearchParams[] = profileQueries
             .filter((q) => q.query && (q.enabled ?? true))
@@ -87,61 +88,72 @@ function makeAtsSource(company: CompanyRow): JobSource | null {
 }
 
 /** Score, filter, dedupe and store; shared by both tracks. Mirrors _score_and_store. */
-function scoreAndStore(jobs: Job[], stats: CollectionStats, profile: ActiveProfile): void {
+async function scoreAndStore(
+    jobs: Job[],
+    stats: CollectionStats,
+    profile: ActiveProfile,
+): Promise<void> {
     const profileId = profile._id;
     const minStore = Math.trunc(profile.scoring.min_score_to_store ?? 25);
 
-    for (const job of jobs) {
-        const result = scoreJob(job.title, job.description, job.location, profile);
+    // One transaction per batch: a remote database round-trips per insert, so
+    // batching on a single connection keeps collection fast and atomic.
+    await withTransaction(async (client) => {
+        for (const job of jobs) {
+            const result = scoreJob(job.title, job.description, job.location, profile);
 
-        if (result.score < minStore) {
-            stats.filtered_out += 1;
-            continue;
+            if (result.score < minStore) {
+                stats.filtered_out += 1;
+                continue;
+            }
+
+            job.relevance_score = result.score;
+            job.experience_level = result.experience_level;
+            job.india_friendly = result.india_friendly;
+            job.location_note = result.location_note;
+
+            const techSet = new Set(
+                job.tech_stack
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter(Boolean),
+            );
+            for (const t of result.tech_stack) techSet.add(t);
+            job.tech_stack = [...techSet].sort().join(", ");
+
+            if (!job.company_domain) {
+                job.company_domain = extractDomain(job.url);
+            }
+
+            const status = await insertJob(
+                {
+                    id: jobFingerprint(job),
+                    title: job.title,
+                    company: job.company,
+                    location: job.location,
+                    description: job.description,
+                    url: job.url,
+                    source: job.source,
+                    posted_date: job.posted_date,
+                    discovered_at: utcNowIso(),
+                    tech_stack: job.tech_stack,
+                    experience_level: job.experience_level,
+                    relevance_score: job.relevance_score,
+                    status: job.status,
+                    company_domain: job.company_domain,
+                    salary: job.salary,
+                    job_type: job.job_type,
+                    india_friendly: job.india_friendly,
+                    location_note: job.location_note,
+                    scored_profile_id: profileId,
+                },
+                client,
+            );
+
+            if (status === "new") stats.new += 1;
+            else stats.updated += 1;
         }
-
-        job.relevance_score = result.score;
-        job.experience_level = result.experience_level;
-        job.india_friendly = result.india_friendly;
-        job.location_note = result.location_note;
-
-        const techSet = new Set(
-            job.tech_stack
-                .split(",")
-                .map((t) => t.trim())
-                .filter(Boolean),
-        );
-        for (const t of result.tech_stack) techSet.add(t);
-        job.tech_stack = [...techSet].sort().join(", ");
-
-        if (!job.company_domain) {
-            job.company_domain = extractDomain(job.url);
-        }
-
-        const status = insertJob({
-            id: jobFingerprint(job),
-            title: job.title,
-            company: job.company,
-            location: job.location,
-            description: job.description,
-            url: job.url,
-            source: job.source,
-            posted_date: job.posted_date,
-            discovered_at: utcNowIso(),
-            tech_stack: job.tech_stack,
-            experience_level: job.experience_level,
-            relevance_score: job.relevance_score,
-            status: job.status,
-            company_domain: job.company_domain,
-            salary: job.salary,
-            job_type: job.job_type,
-            india_friendly: job.india_friendly,
-            location_note: job.location_note,
-            scored_profile_id: profileId,
-        });
-
-        if (status === "new") stats.new += 1;
-        else stats.updated += 1;
-    }
+    });
 }
 
 /** Run async `fn` over `items` with at most `limit` in flight at a time. */
@@ -177,7 +189,7 @@ async function fetchFromSource(source: JobSource): Promise<Job[]> {
 /** Track A: fetch + score/store from the public job boards. */
 export async function runJobBoards(): Promise<CollectionStats> {
     const stats = newStats();
-    const sources = buildJobBoardSources();
+    const sources = await buildJobBoardSources();
     const results = await Promise.all(sources.map((s) => fetchFromSource(s)));
 
     const allJobs: Job[] = [];
@@ -188,7 +200,7 @@ export async function runJobBoards(): Promise<CollectionStats> {
     });
 
     stats.fetched = allJobs.length;
-    scoreAndStore(allJobs, stats, getActiveProfile());
+    await scoreAndStore(allJobs, stats, await getActiveProfile());
     return stats;
 }
 
@@ -197,7 +209,7 @@ export async function runCompanyCrawl(companyIds?: string[]): Promise<Collection
     const stats: CollectionStats = { ...newStats(), companies_crawled: 0, companies_failed: 0 };
     logger.info("Starting company crawl...");
 
-    let companies = getCompanies({ crawl_status: "active" });
+    let companies = await getCompanies({ crawl_status: "active" });
     if (companyIds) companies = companies.filter((c) => companyIds.includes(c.id));
 
     if (!companies.length) {
@@ -212,13 +224,13 @@ export async function runCompanyCrawl(companyIds?: string[]): Promise<Collection
         if (!source) return [] as Job[];
         try {
             const jobs = await source.fetch();
-            updateCompanyCrawlStatus(company.id, "active", utcNowIso());
+            await updateCompanyCrawlStatus(company.id, "active", utcNowIso());
             logger.info(`  [OK] ${company.name} (${company.ats_platform}): ${jobs.length} jobs`);
             stats.companies_crawled = (stats.companies_crawled ?? 0) + 1;
             stats.sources[`${company.ats_platform}:${company.ats_slug}`] = jobs.length;
             return jobs;
         } catch (err) {
-            updateCompanyCrawlStatus(company.id, "failed", utcNowIso());
+            await updateCompanyCrawlStatus(company.id, "failed", utcNowIso());
             logger.warn(`  [FAIL] ${company.name}: ${String(err)}`);
             stats.companies_failed = (stats.companies_failed ?? 0) + 1;
             return [] as Job[];
@@ -228,7 +240,7 @@ export async function runCompanyCrawl(companyIds?: string[]): Promise<Collection
     const allJobs = results.flat();
     stats.fetched = allJobs.length;
     logger.info(`  Total from companies: ${allJobs.length}`);
-    scoreAndStore(allJobs, stats, getActiveProfile());
+    await scoreAndStore(allJobs, stats, await getActiveProfile());
     return stats;
 }
 
@@ -251,7 +263,7 @@ export async function runCollection(includeCompanies = true): Promise<Collection
     }
 
     logger.info(`--- Cleanup (jobs older than ${STALE_JOB_DAYS} days) ---`);
-    const deleted = cleanupOldJobs(STALE_JOB_DAYS);
+    const deleted = await cleanupOldJobs(STALE_JOB_DAYS);
     logger.info(`  Deleted ${deleted} stale jobs`);
 
     const total: CollectionStats = {

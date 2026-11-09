@@ -1,4 +1,3 @@
-import { getActiveProfile } from "../db/profile.js";
 import type { ActiveProfile } from "../schemas/profile.js";
 import { pyRound } from "../utils/round.js";
 
@@ -129,9 +128,9 @@ export function scoreJob(
     title: string,
     description: string,
     location = "",
-    profile?: ActiveProfile,
+    profile: ActiveProfile,
 ): ScoreResult {
-    const p = profile ?? getActiveProfile();
+    const p = profile;
     const search = p.search;
     const scoring = p.scoring;
     const weights = scoring.weights;
