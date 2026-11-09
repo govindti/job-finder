@@ -4,7 +4,12 @@
         "noEmit": true,
         "rootDir": "..",
         "outDir": "../dist",
-        "types": ["bun", "node"]
+        "types": [
+            "bun",
+            "node"
+        ]
     },
-    "include": ["**/*.ts"]
+    "include": [
+        "**/*.ts"
+    ]
 }

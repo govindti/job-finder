@@ -49,8 +49,8 @@ export function getPool(): Pool {
     if (!url) {
       throw new Error(
         "DATABASE_URL is not set. Point it at a PostgreSQL database, e.g. " +
-          "postgresql://user:pass@host/db?sslmode=require (Neon/Supabase) or " +
-          "postgresql://postgres:postgres@localhost:5432/job_finder",
+        "postgresql://user:pass@host/db?sslmode=require (Neon/Supabase) or " +
+        "postgresql://postgres:postgres@localhost:5432/job_finder",
       );
     }
     pool = new Pool({
