@@ -50,8 +50,8 @@ export function bootstrap(): void {
     });
 }
 
-// Run when executed directly (not when imported by a test/tool).
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (invokedPath.endsWith("server.js") || invokedPath.endsWith("server.ts")) {
+// Run when executed directly (not when imported by a test/tool). Bun exposes
+// this natively, so no argv/path sniffing is needed.
+if (import.meta.main) {
     bootstrap();
 }

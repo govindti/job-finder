@@ -1,4 +1,5 @@
-import { getDb } from "./connection.js";
+import { getDb, namedParams } from "./connection.js";
+import type { SQLQueryBindings } from "bun:sqlite";
 import { daysAgoIso, utcNowIso } from "../utils/models.js";
 
 // ── Row types (column names mirror the SQLite tables exactly) ─────────
@@ -161,7 +162,7 @@ export function insertJob(job: JobInsert): "new" | "updated" {
         @source, @posted_date, @discovered_at, @tech_stack, @experience_level,
         @relevance_score, @status, @company_domain, @salary, @job_type,
         @india_friendly, @location_note, @last_seen, @scored_profile_id)`,
-    ).run({ ...job, last_seen: now, scored_profile_id: job.scored_profile_id ?? null });
+    ).run(namedParams({ ...job, last_seen: now, scored_profile_id: job.scored_profile_id ?? null }));
     return "new";
 }
 
@@ -176,7 +177,7 @@ export function cleanupOldJobs(days = 14): number {
           AND status IN ('new', 'reviewed', 'stale')
           AND (mark_for_email = 0 OR mark_for_email IS NULL)`,
         )
-        .run({ cutoff });
+        .run(namedParams({ cutoff }));
     return info.changes;
 }
 
@@ -217,7 +218,7 @@ export function getJobs(f: JobFilters = {}): JobRow[] {
     const offset = f.offset ?? 0;
 
     let query = "SELECT * FROM jobs WHERE relevance_score >= ?";
-    const params: unknown[] = [minScore];
+    const params: SQLQueryBindings[] = [minScore];
 
     if (f.source) {
         query += " AND source LIKE ?";
@@ -334,7 +335,7 @@ export function upsertCompany(c: CompanyInsert): boolean {
              @founded_year, @employee_count, @tags, @india_friendly,
              @last_crawled, @crawl_status, @notes)`,
             )
-            .run(c);
+            .run(namedParams(c));
         return true;
     } catch {
         return false;
@@ -353,7 +354,7 @@ export interface CompanyFilters {
 export function getCompanies(f: CompanyFilters = {}): CompanyRow[] {
     const d = getDb();
     let query = "SELECT * FROM companies WHERE 1=1";
-    const params: unknown[] = [];
+    const params: SQLQueryBindings[] = [];
     if (f.ats_platform) {
         query += " AND ats_platform = ?";
         params.push(f.ats_platform);
@@ -436,7 +437,7 @@ export function insertOutreach(item: OutreachRow): boolean {
              @contact_position, @contact_linkedin, @dm_short, @dm_long, @status,
              @messaged_at, @replied_at, @followed_up_at, @created_at, @notes, @profile_id)`,
             )
-            .run(item);
+            .run(namedParams(item));
         return true;
     } catch {
         return false;
@@ -459,7 +460,7 @@ export function getOutreach(f: OutreachFilters = {}): OutreachJoined[] {
     FROM outreach o
     LEFT JOIN jobs j ON j.id = o.job_id
     WHERE 1=1`;
-    const params: unknown[] = [];
+    const params: SQLQueryBindings[] = [];
     if (f.status) {
         query += " AND o.status = ?";
         params.push(f.status);

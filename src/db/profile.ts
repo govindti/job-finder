@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import type { SQLQueryBindings } from "bun:sqlite";
 import { getDb } from "../db/connection.js";
 import { utcNowIso } from "../utils/models.js";
 import { env } from "../config/env.js";
@@ -248,7 +249,7 @@ export function updateProfile(
 ): void {
   const d = getDb();
   const updates: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLQueryBindings[] = [];
   if (opts.config !== undefined) {
     updates.push("config_json = ?");
     params.push(JSON.stringify(validateConfig(opts.config)));

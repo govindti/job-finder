@@ -1,14 +1,12 @@
-import "dotenv/config";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Bun loads .env (and .env.local / .env.[NODE_ENV]) automatically, so there is
+// no dotenv bootstrap here — only path resolution.
 
 // Repo layout: env.ts lives in job-finder/src/config/, so:
 //   - project root for job-finder is three levels up (src/config -> src -> job-finder)
 //   - DB sits at job-finder/jobs.db at the project root
-export const JOB_FINDER_ROOT = path.resolve(__dirname, "..", "..");
+export const JOB_FINDER_ROOT = path.resolve(import.meta.dir, "..", "..");
 
 function envInt(name: string, fallback: number): number {
     const raw = process.env[name];

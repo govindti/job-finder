@@ -3,26 +3,27 @@
 A job-hunting platform I built in JavaScript/TypeScript: a multi-source job
 scraper with a scoring engine, MD5 dedupe, stale-job cleanup, a LinkedIn
 outreach generator, a daily email digest, Google Sheets export, and a web
-dashboard. The backend runs on Node 20 + Express + better-sqlite3 + node-cron,
-and the UI is a Next.js app under `web/`.
+dashboard. The backend runs on Bun with Express + `bun:sqlite` + node-cron (no
+`Bun.serve` — the HTTP server is still Express on `node:http`), and the UI is a
+Next.js app under `web/`, also launched through Bun.
 
 ## Stack
 
 | Concern            | Choice                                        |
 | ------------------ | --------------------------------------------- |
-| Runtime            | Node 20+                                       |
+| Runtime            | Bun 1.2+ (package manager + runtime)          |
 | Language           | TypeScript (strict, ESM `NodeNext`)            |
-| HTTP framework     | Express 4                                      |
+| HTTP framework     | Express 4 on `node:http` (not `Bun.serve`)     |
 | Validation         | `zod` (every external API response is validated) |
-| Database           | `better-sqlite3` (synchronous, no ORM)         |
+| Database           | `bun:sqlite` (built into Bun, synchronous, no ORM) |
 | Scheduler          | `node-cron` (timezone `Asia/Kolkata`)          |
 | Email              | `nodemailer` (Gmail SMTP_SSL :465)             |
 | HTTP client        | native `fetch` + `AbortController` (timeout + retry/backoff) |
 | HTML parsing       | `cheerio`                                      |
-| Config / presets   | `yaml`, `dotenv`                               |
+| Config / presets   | `yaml` + Bun's built-in `.env` loading         |
 | Logging            | `pino`                                          |
 | Google Sheets      | `googleapis` (Sheets v4)                       |
-| Frontend           | Next.js (`web/`)                               |
+| Frontend           | Next.js (`web/`), launched with `bun --bun`    |
 
 ## Project layout
 
@@ -51,9 +52,9 @@ job-finder/
 
 ```bash
 cd job-finder
-npm install
+bun install               # writes bun.lock (no package-lock.json)
 cp .env.example .env      # fill in the values you need (see below)
-npm run dev               # tsx watch src/server.ts  → http://127.0.0.1:8000
+bun run dev               # bun --watch src/server.ts + next dev → http://127.0.0.1:8000
 ```
 
 `jobs.db` is created automatically on first run, the schema is migrated in, and
@@ -75,14 +76,18 @@ All variables live in `.env` (see `.env.example`):
 
 Relative credential paths are resolved against the `job-finder/` root.
 
-## npm scripts
+## bun scripts
 
-| Script               | Does                                             |
-| -------------------- | ------------------------------------------------ |
-| `npm run dev`        | Dev server with reload (`tsx watch`)             |
-| `npm run build`      | Compile TS → `dist/`                               |
-| `npm start`          | Run compiled output (`node dist/server.js`)      |
-| `npm run typecheck`  | `tsc --noEmit` across the whole project          |
+| Script                  | Does                                                |
+| ----------------------- | --------------------------------------------------- |
+| `bun run dev`           | API with reload (`bun --watch`) + Next dev server   |
+| `bun run dev:api`       | API only (`bun --watch src/server.ts`)              |
+| `bun run dev:web`       | Next dev server only (`bun --bun next dev`)         |
+| `bun run build`         | Typecheck, compile TS → `dist/`, build `web/`        |
+| `bun start`             | Run compiled output (`bun dist/server.js`) + Next    |
+| `bun run start:api`     | API only (`bun dist/server.js`)                      |
+| `bun run typecheck`     | `tsc --noEmit` across the whole project             |
+| `bun install`           | Install / update deps and `bun.lock`                 |
 
 ## Data flow
 
@@ -135,6 +140,16 @@ HTTP 200 (job-not-found, company-not-found, sheets errors).
 
 ## Notes
 
+- Runtime is Bun: `bun install` (with `bun.lock`) replaces npm, `bun --watch`
+  replaces `tsx`, and `.env` is loaded by Bun itself — no `dotenv` bootstrap.
+- The database is `bun:sqlite` instead of the `better-sqlite3` native addon.
+  bun:sqlite only binds named parameters by their prefixed key (`@id`), so
+  `namedParams()` in `src/db/connection.ts` maps row objects onto that form and
+  throws on `undefined` instead of silently binding NULL.
+- Express still owns the HTTP server (`app.listen` on `node:http`); nothing is
+  served through `Bun.serve`.
+- `node:fs`, `node:path` and `node:crypto` imports are kept on purpose — Bun
+  implements them natively.
 - `POST /api/companies/detect-ats` and `POST /api/companies/discover` are
   placeholders that return `{ "error": "not implemented" }`. The ATS
   platform/slug is still set when seeding or when adding/updating a company.

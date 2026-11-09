@@ -1,15 +1,36 @@
-import Database from "better-sqlite3";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { env } from "../config/env.js";
 
-let db: Database.Database | null = null;
+// Bun's built-in SQLite driver replaces the native better-sqlite3 addon; the
+// synchronous prepare/run/all/get surface is the same.
+let db: Database | null = null;
+
+/** Shape bun:sqlite accepts for named-parameter objects (keys keep their prefix). */
+export type NamedBindings = Extract<SQLQueryBindings, Record<string, unknown>>;
 
 /** Open (once) and return the shared connection. */
-export function getDb(): Database.Database {
+export function getDb(): Database {
   if (!db) {
     db = new Database(env.DB_PATH);
-    db.pragma("journal_mode = WAL");
+    // WAL lets the dashboard read while the collector writes.
+    db.exec("PRAGMA journal_mode = WAL;");
   }
   return db;
+}
+
+/**
+ * Adapt a plain row object to a named-parameter binding. bun:sqlite resolves
+ * named parameters by their prefixed key (`@id`, `:id`, `$id`) only — a bare
+ * `{ id }` object binds nothing — so rows are mapped onto the `@name` form used
+ * by the SQL here. `undefined` throws instead of silently binding NULL.
+ */
+export function namedParams<T extends object>(row: T): NamedBindings {
+  const out: NamedBindings = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value === undefined) throw new Error(`Missing SQL bind value for @${key}`);
+    out[`@${key}`] = value as NamedBindings[string];
+  }
+  return out;
 }
 
 let schemaReady = false;
@@ -194,7 +215,7 @@ export function isSchemaReady(): boolean {
 }
 
 function addColumnIfMissing(
-  d: Database.Database,
+  d: Database,
   table: string,
   column: string,
   definition: string,
