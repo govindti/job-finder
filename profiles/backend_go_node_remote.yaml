@@ -1,0 +1,233 @@
+name: "Backend Go / Node.js (Remote, 1-2 YOE)"
+description: "Go / Node.js / TypeScript backend, remote-only, junior-to-early-mid. PostgreSQL-focused. India-friendly, worldwide-remote queries."
+schema_version: 1
+
+search:
+  default_terms:
+    - "golang backend developer remote"
+    - "go developer remote"
+    - "nodejs typescript backend remote"
+    - "backend engineer go node remote"
+    - "golang microservices remote"
+  title_keywords_positive:
+    - "backend"
+    - "back-end"
+    - "back end"
+    - "golang"
+    - "go developer"
+    - "go engineer"
+    - "node"
+    - "nodejs"
+    - "node.js"
+    - "typescript"
+    - "software engineer"
+    - "software developer"
+    - "api developer"
+    - "microservices"
+  title_keywords_negative:
+    - "frontend"
+    - "front-end"
+    - "front end"
+    - "ios"
+    - "android"
+    - "mobile"
+    - "react"
+    - "vue"
+    - "angular"
+    - "data scientist"
+    - "machine learning"
+    - "ml engineer"
+    - "ui/ux"
+    - "designer"
+    - "qa"
+    - "test"
+    - "intern"
+    - "internship"
+    - "trainee"
+    - "senior"
+    - "staff"
+    - "principal"
+    - "lead"
+    - "manager"
+  relevant_tech:
+    - "go"
+    - "golang"
+    - "node"
+    - "nodejs"
+    - "node.js"
+    - "typescript"
+    - "javascript"
+    - "express"
+    - "nestjs"
+    - "grpc"
+    - "postgresql"
+    - "postgres"
+    - "mysql"
+    - "mongodb"
+    - "redis"
+    - "docker"
+    - "kubernetes"
+    - "aws"
+    - "gcp"
+    - "rest"
+    - "graphql"
+    - "sql"
+    - "nosql"
+    - "microservices"
+    - "rabbitmq"
+    - "kafka"
+    - "elasticache"
+    - "terraform"
+  jsearch_default_queries:
+    - { query: "golang backend developer", country: "IN", date_posted: "3days", remote_jobs_only: true }
+    - { query: "go developer remote", country: "IN", date_posted: "week", remote_jobs_only: true }
+    - { query: "nodejs typescript backend", country: "IN", date_posted: "3days", remote_jobs_only: true }
+    - { query: "golang microservices engineer", country: "IN", date_posted: "week", remote_jobs_only: true }
+    - { query: "backend go node remote", country: "Worldwide", date_posted: "week", remote_jobs_only: true }
+    - { query: "typescript node backend remote", country: "US", date_posted: "week", remote_jobs_only: true }
+
+scoring:
+  experience_target: "junior"
+  min_relevance_score: 50
+  min_score_to_store: 25
+  # Weights intentionally sum to 100 (title 30 + tech 35 + experience 20 + signal 15).
+  weights: { title: 30, tech: 35, experience: 20, signal: 15 }
+  core_tech:
+    - "go"
+    - "golang"
+    - "node"
+    - "nodejs"
+    - "typescript"
+  backend_signals:
+    - "api"
+    - "backend"
+    - "back-end"
+    - "server-side"
+    - "microservice"
+    - "grpc"
+    - "database"
+    - "postgresql"
+    - "rest"
+    - "graphql"
+    - "endpoint"
+
+location:
+  india_positive:
+    - "india"
+    - "asia"
+    - "worldwide"
+    - "global"
+    - "anywhere"
+    - "apac"
+    - "asia pacific"
+    - "asia-pacific"
+    - "remote - global"
+    - "remote global"
+    - "globally distributed"
+    - "work from anywhere"
+    - "location independent"
+    - "south asia"
+    - "southeast asia"
+    - "emea/apac"
+    - "mumbai"
+    - "bangalore"
+    - "bengaluru"
+    - "hyderabad"
+    - "pune"
+    - "delhi"
+    - "chennai"
+    - "kolkata"
+    - "noida"
+    - "gurgaon"
+    - "gurugram"
+    - "new delhi"
+    - "kochi"
+    - "jaipur"
+    - "ahmedabad"
+    - "remote - india"
+    - "ist"
+    - "indian standard time"
+  india_negative:
+    - "us only"
+    - "usa only"
+    - "us-only"
+    - "united states only"
+    - "must be located in the us"
+    - "must reside in the us"
+    - "us-based"
+    - "us based"
+    - "u.s. only"
+    - "u.s. based"
+    - "canada only"
+    - "uk only"
+    - "eu only"
+    - "europe only"
+    - "european union only"
+    - "uk-based"
+    - "eu-based"
+    - "must be authorized to work in the united states"
+    - "no visa sponsorship"
+    - "us citizen"
+    - "us work authorization"
+    - "est/cst/pst"
+    - "americas only"
+    - "americas timezone"
+    - "north america only"
+    - "na only"
+    - "latam only"
+  timezone_compatible:
+    - "ist"
+    - "gmt"
+    - "utc"
+    - "cet"
+    - "eet"
+    - "ast"
+    - "flexible"
+    - "async"
+    - "asynchronous"
+    - "overlap"
+    - "any timezone"
+    - "all timezones"
+  timezone_incompatible:
+    - "pst only"
+    - "est only"
+    - "cst only"
+    - "mst only"
+    - "pacific time only"
+    - "eastern time only"
+    - "us timezone required"
+    - "us hours required"
+    - "core hours pst"
+    - "core hours est"
+
+outreach:
+  candidate_name: "Parmanand"
+  candidate_core_tech: ["go", "golang", "node.js", "typescript", "postgresql"]
+  candidate_extra_tech: ["docker", "kubernetes", "grpc", "redis", "aws", "microservices"]
+  linkedin_search_titles:
+    - { title: "Engineering Manager", label: "Eng Manager", category: "engineering" }
+    - { title: "Tech Lead", label: "Tech Lead", category: "engineering" }
+    - { title: "Head of Engineering", label: "Head of Eng", category: "engineering" }
+    - { title: "CTO", label: "CTO", category: "executive" }
+    - { title: "CEO Founder", label: "CEO / Founder", category: "executive" }
+    - { title: "Technical Recruiter", label: "Tech Recruiter", category: "hr" }
+    - { title: "HR Manager", label: "HR Manager", category: "hr" }
+  bio_short: "1-2 years building {stack} backends"
+  achievements:
+    - "Built and shipped production {stack} microservices handling real user traffic."
+    - "Designed PostgreSQL schemas and REST/gRPC APIs with sub-200ms p95 latency."
+    - "Containerised services with Docker and automated deploys on AWS."
+  dm_short_template: "{greeting}, I noticed {company} is hiring for {title}. I have {bio_short} and love working with {stack}. Would love to connect."
+  dm_long_template: |
+    {greeting},
+
+    Noticed {company} is hiring for {title}. The stack caught my eye — I've been shipping {stack} backends for 1-2 years.
+
+    {achievements}
+
+    Open to a 15-min chat to see if there's a fit?
+
+    Thanks,
+    {candidate_name}
+  email_digest_subject_role: "backend"
+  email_greeting: "Your Daily Job Digest"
