@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { Database } from "bun:sqlite";
-import { closePool, initSchema, query, withTransaction } from "../src/db/connection.js";
+import { closePool, initSchema, query, withTransaction } from "../src/infrastructure/database/connection.js";
 import { env } from "../src/config/env.js";
 import { logger } from "../src/config/logger.js";
 

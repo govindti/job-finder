@@ -1,5 +1,7 @@
 "use client";
 
+import { formatApiError } from "../lib/api-error";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Nav } from "@/components/Nav";
 import { Modal } from "@/components/Modal";
@@ -103,7 +105,7 @@ export default function JobsPage() {
             );
             setJobs(data.jobs ?? []);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Failed to load jobs", "error");
+            showToast(formatApiError(err, "Failed to load jobs"), "error");
         } finally {
             setLoading(false);
         }
@@ -253,7 +255,7 @@ export default function JobsPage() {
             ]);
         } catch (err) {
             showToast(
-                `Collection failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Collection failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -272,7 +274,7 @@ export default function JobsPage() {
             setSelectedJob((prev) => (prev && prev.id === jobId ? { ...prev, status } : prev));
             await loadJobs();
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Status update failed", "error");
+            showToast(formatApiError(err, "Status update failed"), "error");
         }
     }
 
@@ -296,7 +298,7 @@ export default function JobsPage() {
                     : prev,
             );
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Could not toggle mark", "error");
+            showToast(formatApiError(err, "Could not toggle mark"), "error");
         }
     }
 
@@ -305,7 +307,7 @@ export default function JobsPage() {
             const data = await api<{ queries: SearchQuery[] }>("/search-queries");
             setQueries(data.queries ?? []);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Failed to load queries", "error");
+            showToast(formatApiError(err, "Failed to load queries"), "error");
         }
     }
 
@@ -328,7 +330,7 @@ export default function JobsPage() {
                 body: { [field]: value },
             });
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Update failed", "error");
+            showToast(formatApiError(err, "Update failed"), "error");
             await loadQueries();
         }
     }
@@ -352,7 +354,7 @@ export default function JobsPage() {
             showToast("Query added");
             await loadQueries();
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Could not add query", "error");
+            showToast(formatApiError(err, "Could not add query"), "error");
         }
     }
 
@@ -363,14 +365,14 @@ export default function JobsPage() {
             showToast("Query deleted");
             await loadQueries();
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Delete failed", "error");
+            showToast(formatApiError(err, "Delete failed"), "error");
         }
     }
 
     async function doExport(): Promise<void> {
         setExporting(true);
         try {
-            const data = await api<{ error?: string; exported?: number }>(
+            const data = await api<{ exported: number }>(
                 `/export/sheets${qs({
                     sheet_name: exportForm.sheet_name,
                     min_score: exportForm.min_score,
@@ -379,15 +381,11 @@ export default function JobsPage() {
                 })}`,
                 { method: "POST" },
             );
-            if (data.error) {
-                showToast(`Export failed: ${data.error}`, "error");
-            } else {
-                showToast(`Exported ${data.exported ?? 0} jobs to Google Sheets!`);
-                setExportOpen(false);
-            }
+            showToast(`Exported ${data.exported ?? 0} jobs to Google Sheets!`);
+            setExportOpen(false);
         } catch (err) {
             showToast(
-                `Export failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Export failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {

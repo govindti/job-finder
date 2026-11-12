@@ -22,7 +22,7 @@
         "start:web": "bun run --filter=job-finder-web start",
         "db:import": "bun scripts/import-sqlite.ts",
         "test": "bun test tests",
-        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json && bun run --filter=job-finder-web typecheck"
+        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json && tsc -p tests/tsconfig.json && bun run --filter=job-finder-web typecheck"
     },
     "dependencies": {
         "cheerio": "^1.1.2",

@@ -1,5 +1,7 @@
 "use client";
 
+import { formatApiError } from "../../lib/api-error";
+
 import { useCallback, useEffect, useState } from "react";
 import { Nav } from "@/components/Nav";
 import { Toast } from "@/components/Toast";
@@ -97,7 +99,7 @@ export default function ProfilePage() {
                 setMeta(null);
             }
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Failed to load profiles", "error");
+            showToast(formatApiError(err, "Failed to load profiles"), "error");
         } finally {
             setLoading(false);
         }
@@ -275,7 +277,7 @@ export default function ProfilePage() {
             await loadActive();
             setConfig(payload);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Save failed", "error");
+            showToast(formatApiError(err, "Save failed"), "error");
         } finally {
             setBusy(null);
         }
@@ -295,7 +297,7 @@ export default function ProfilePage() {
             setMeta(null);
             await boot();
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Delete failed", "error");
+            showToast(formatApiError(err, "Delete failed"), "error");
         } finally {
             setBusy(null);
         }
@@ -315,7 +317,7 @@ export default function ProfilePage() {
             await loadProfiles();
             await selectProfile(result.id);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Duplicate failed", "error");
+            showToast(formatApiError(err, "Duplicate failed"), "error");
         } finally {
             setBusy(null);
         }
@@ -334,7 +336,7 @@ export default function ProfilePage() {
             await selectProfile(result.id);
             showToast("Created (starts with defaults — customize and save)");
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Create failed", "error");
+            showToast(formatApiError(err, "Create failed"), "error");
         } finally {
             setBusy(null);
         }
@@ -355,7 +357,7 @@ export default function ProfilePage() {
             await loadActive();
             await selectProfile(result.id);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Import failed", "error");
+            showToast(formatApiError(err, "Import failed"), "error");
         } finally {
             setBusy(null);
         }
@@ -371,15 +373,30 @@ export default function ProfilePage() {
             );
             showToast(`Re-scored ${result.updated} jobs (deleted ${result.deleted})`);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Re-score failed", "error");
+            showToast(formatApiError(err, "Re-score failed"), "error");
         } finally {
             setBusy(null);
         }
     }
 
-    function exportActiveProfile(): void {
+    async function exportActiveProfile(): Promise<void> {
         if (currentId === null) return;
-        window.open(`/api/profiles/${currentId}/export`, "_blank");
+        setBusy("export");
+        try {
+            const yaml = await api<string>(`/profiles/${currentId}/export`);
+            const url = URL.createObjectURL(new Blob([yaml], { type: "application/x-yaml" }));
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `profile-${currentId}.yaml`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 0);
+        } catch (err) {
+            showToast(formatApiError(err, "Export failed"), "error");
+        } finally {
+            setBusy(null);
+        }
     }
 
     const weightsTotal = config

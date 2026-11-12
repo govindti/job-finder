@@ -118,11 +118,9 @@ export interface HunterStatus {
     plan?: string;
     used?: number;
     available?: number;
-    error?: string;
 }
 
 export interface DigestPreview {
-    error?: string;
     sent?: number;
     message?: string;
     dry_run?: boolean;

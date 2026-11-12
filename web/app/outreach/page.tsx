@@ -1,5 +1,7 @@
 "use client";
 
+import { formatApiError } from "../../lib/api-error";
+
 import { useCallback, useEffect, useState } from "react";
 import { Nav } from "@/components/Nav";
 import { Toast } from "@/components/Toast";
@@ -75,6 +77,7 @@ export default function OutreachPage() {
 
     const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
     const [hunter, setHunter] = useState<HunterStatus | null>(null);
+    const [hunterError, setHunterError] = useState<string | null>(null);
     const [activeProfile, setActiveProfile] = useState("…");
 
     const { toast, showToast } = useToast();
@@ -99,7 +102,7 @@ export default function OutreachPage() {
             const ids = new Set(nextItems.map((item) => item.id));
             setSelected((prev) => new Set([...prev].filter((id) => ids.has(id))));
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Failed to load outreach", "error");
+            showToast(formatApiError(err, "Failed to load outreach"), "error");
         } finally {
             setLoading(false);
         }
@@ -124,8 +127,10 @@ export default function OutreachPage() {
     const loadHunterStatus = useCallback(async () => {
         try {
             setHunter(await api<HunterStatus>("/hunter/status"));
-        } catch {
+            setHunterError(null);
+        } catch (err) {
             setHunter(null);
+            setHunterError(formatApiError(err));
         }
     }, []);
 
@@ -195,7 +200,7 @@ export default function OutreachPage() {
             await Promise.all([loadOutreach(), loadStats()]);
         } catch (err) {
             showToast(
-                `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Delete failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -209,9 +214,7 @@ export default function OutreachPage() {
             const data = await api<DigestPreview>("/email/send-now?dry_run=true", {
                 method: "POST",
             });
-            if (data.error) {
-                showToast(data.error, "error");
-            } else if (data.items_count === 0 || data.sent === 0) {
+            if (data.items_count === 0 || data.sent === 0) {
                 showToast(data.message || "No new items to email");
             } else {
                 const companies = (data.preview ?? [])
@@ -222,7 +225,7 @@ export default function OutreachPage() {
             }
         } catch (err) {
             showToast(
-                `Failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -237,9 +240,7 @@ export default function OutreachPage() {
         setBusy("send");
         try {
             const data = await api<DigestPreview>("/email/send-now", { method: "POST" });
-            if (data.error) {
-                showToast(`Failed: ${data.error}`, "error");
-            } else if (data.sent) {
+            if (data.sent) {
                 showToast(`✓ Sent ${data.sent} items to ${data.recipient}`);
                 await loadOutreach();
             } else {
@@ -250,7 +251,7 @@ export default function OutreachPage() {
             }
         } catch (err) {
             showToast(
-                `Failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -261,13 +262,11 @@ export default function OutreachPage() {
     async function syncOutreach(): Promise<void> {
         setBusy("sync");
         try {
-            const data = await api<{ generated?: number; error?: string; message?: string }>(
+            const data = await api<{ generated: number; message?: string }>(
                 "/outreach/generate?min_score=40&limit=15&india_friendly=maybe",
                 { method: "POST" },
             );
-            if (data.error) {
-                showToast(data.error, "error");
-            } else if (data.generated === 0) {
+            if (data.generated === 0) {
                 showToast(
                     data.message ||
                         "No new jobs eligible for outreach — try Refresh to collect fresh jobs",
@@ -279,7 +278,7 @@ export default function OutreachPage() {
             await Promise.all([loadOutreach(), loadStats(), loadHunterStatus()]);
         } catch (err) {
             showToast(
-                `Sync failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Sync failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -310,7 +309,7 @@ export default function OutreachPage() {
             await Promise.all([loadOutreach(), loadStats(), loadHunterStatus()]);
         } catch (err) {
             showToast(
-                `Refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Refresh failed: ${formatApiError(err)}`,
                 "error",
             );
         } finally {
@@ -324,7 +323,7 @@ export default function OutreachPage() {
             showToast(`Marked as ${status}`);
             await Promise.all([loadOutreach(), loadStats()]);
         } catch (err) {
-            showToast(err instanceof Error ? err.message : "Update failed", "error");
+            showToast(formatApiError(err, "Update failed"), "error");
         }
     }
 
@@ -355,15 +354,15 @@ export default function OutreachPage() {
                     <span
                         style={{
                             fontSize: 12,
-                            color: hunter?.configured && !hunter.error ? "var(--text-muted)" : "var(--red)",
+                            color: hunter?.configured && !hunterError ? "var(--text-muted)" : "var(--red)",
                         }}
                     >
-                        {!hunter
-                            ? "Hunter: loading..."
-                            : !hunter.configured
-                              ? "Hunter: not configured"
-                              : hunter.error
-                                ? `Hunter: ${hunter.error}`
+                        {hunterError
+                            ? `Hunter: ${hunterError}`
+                            : !hunter
+                              ? "Hunter: loading..."
+                              : !hunter.configured
+                                ? "Hunter: not configured"
                                 : `Hunter: ${hunter.used ?? 0}/${
                                       (hunter.used ?? 0) + (hunter.available ?? 0)
                                   } used (${hunter.plan ?? ""})`}

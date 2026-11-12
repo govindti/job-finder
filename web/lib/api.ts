@@ -1,53 +1,52 @@
+import { isApiErrorBody } from "../../src/common/errors/error-codes";
+import { ApiError } from "./api-error";
+
 export interface ApiOptions extends Omit<RequestInit, "body"> {
     body?: unknown;
-}
-
-interface ErrorBody {
-    detail?: string;
-    error?: string;
 }
 
 /** Small typed wrapper around fetch for the native Bun API (proxied by Next). */
 export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
     const { body, headers, ...rest } = opts;
-    const finalHeaders: Record<string, string> = {
-        ...(headers as Record<string, string> | undefined),
-    };
+    const finalHeaders = new Headers(headers);
 
     let requestBody: BodyInit | undefined;
     if (body !== undefined) {
         requestBody = typeof body === "string" ? body : JSON.stringify(body);
-        if (!finalHeaders["Content-Type"]) {
-            finalHeaders["Content-Type"] = "application/json";
-        }
+        if (!finalHeaders.has("Content-Type")) finalHeaders.set("Content-Type", "application/json");
     }
 
-    const resp = await fetch(`/api${path}`, {
-        ...rest,
-        headers: finalHeaders,
-        body: requestBody,
-    });
-
-    const text = await resp.text();
+    let resp: Response;
+    let text: string;
+    try {
+        resp = await fetch(`/api${path}`, { ...rest, headers: finalHeaders, body: requestBody });
+        text = await resp.text();
+    } catch (error) {
+        const aborted = error instanceof Error && error.name === "AbortError";
+        throw new ApiError({
+            err_code: aborted ? "REQUEST_ABORTED" : "NETWORK_ERROR", status_code: 0,
+            err_mess: aborted ? "The request was canceled." : "Unable to reach the API. Check your connection and try again.",
+        });
+    }
     let data: unknown = null;
+    let invalidJson = false;
     if (text) {
         try {
             data = JSON.parse(text);
         } catch {
+            invalidJson = true;
             data = text;
         }
     }
 
     if (!resp.ok) {
-        const err = (data ?? {}) as ErrorBody;
-        const detail =
-            err.detail ||
-            err.error ||
-            (typeof data === "string" ? data : "") ||
-            resp.statusText;
-        throw new Error(`${resp.status}: ${detail}`);
+        if (isApiErrorBody(data) && data.status_code === resp.status) throw new ApiError(data);
+        throw new ApiError({ err_code: "HTTP_ERROR", status_code: resp.status, err_mess: `The API request failed (HTTP ${resp.status}). Please try again later.` });
     }
 
+    if (invalidJson && resp.headers.get("content-type")?.includes("application/json")) {
+        throw new ApiError({ err_code: "INVALID_RESPONSE", status_code: resp.status, err_mess: "The API returned an invalid response." });
+    }
     return data as T;
 }
 

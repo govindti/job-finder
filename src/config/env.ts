@@ -38,7 +38,6 @@ export const env = {
     LEGACY_DB_PATH: envStr("LEGACY_DB_PATH") || path.join(JOB_FINDER_ROOT, "jobs.db"),
 
     PROFILES_DIR: path.join(JOB_FINDER_ROOT, "profiles"),
-    PUBLIC_DIR: path.join(JOB_FINDER_ROOT, "public"),
 
     RAPIDAPI_KEY: envStr("RAPIDAPI_KEY"),
     HUNTER_API_KEY: envStr("HUNTER_API_KEY"),
