@@ -7,7 +7,7 @@ interface ErrorBody {
     error?: string;
 }
 
-/** Small typed wrapper around fetch for the Express API (proxied by Next). */
+/** Small typed wrapper around fetch for the native Bun API (proxied by Next). */
 export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
     const { body, headers, ...rest } = opts;
     const finalHeaders: Record<string, string> = {

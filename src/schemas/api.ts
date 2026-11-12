@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Request-body schemas for the Express routes (CompanyInput, ProfileInput,
+// Request-body schemas for the native Bun routes (CompanyInput, ProfileInput,
 // QueryInput, QueryPatch, PresetImport, OutreachBulkDelete). Defaults match
 // the field defaults used across the API.
 

@@ -1,8 +1,4 @@
-import type { NextFunction, Request, RequestHandler, Response } from "express";
-
-// Small query-param coercion helpers (defaults + min/max bounds), an error
-// responder that returns a {detail} JSON body, and the async wrapper Express 4
-// needs because it does not catch rejected promises itself.
+// Query coercion and JSON helpers shared by native Bun request handlers.
 
 export function toInt(raw: unknown, def: number, min?: number, max?: number): number {
     let n = def;
@@ -31,19 +27,38 @@ export function toStr(raw: unknown): string | null {
     return s === "" ? null : s;
 }
 
-/** Respond with a {detail} JSON error body. */
-export function detail(res: Response, status: number, msg: string): Response {
-    return res.status(status).json({ detail: msg });
+/** Respond with the existing API error shape. */
+export function detail(status: number, msg: string): Response {
+    return Response.json({ detail: msg }, { status });
 }
 
-/**
- * Express 4 does not forward rejected promises to the error handler, so every
- * async route handler is wrapped: a rejection becomes `next(err)`.
- */
-export function asyncHandler(
-    fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
-): RequestHandler {
-    return (req, res, next) => {
-        fn(req, res, next).catch(next);
-    };
+export class HttpError extends Error {
+    constructor(public readonly status: number, message: string) {
+        super(message);
+        this.name = "HttpError";
+    }
+}
+
+export function getQuery(req: Request): Record<string, string | string[]> {
+    const query: Record<string, string | string[]> = Object.create(null);
+    for (const [key, value] of new URL(req.url).searchParams) {
+        const existing = query[key];
+        query[key] = existing === undefined ? value : [...(Array.isArray(existing) ? existing : [existing]), value];
+    }
+    return query;
+}
+
+/** Preserve JSON-only body parsing, including empty bodies and strict objects/arrays. */
+export async function readJson(req: Request): Promise<unknown> {
+    const contentType = req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (contentType !== "application/json") return {};
+    const text = await req.text();
+    if (!text) return {};
+    try {
+        const body: unknown = JSON.parse(text);
+        if (body === null || typeof body !== "object") throw new Error("Expected an object or array");
+        return body;
+    } catch {
+        throw new HttpError(400, "Invalid JSON body");
+    }
 }

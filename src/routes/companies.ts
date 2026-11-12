@@ -1,4 +1,3 @@
-import { Router } from "express";
 import {
     getCompanies,
     getCompanyById,
@@ -12,133 +11,110 @@ import { getAllMegaCompanies } from "../db/mega_companies.js";
 import { runCompanyCrawl } from "../sources/collector.js";
 import { makeCompanyId, utcNowIso } from "../utils/models.js";
 import { companyInputSchema } from "../schemas/api.js";
-import { asyncHandler, detail, toInt, toStr } from "./util.js";
+import { detail, toInt, toStr, getQuery, readJson } from "./util.js";
 
 // ── Companies API ───────────────────────────
-export const companiesRouter = Router();
 
-companiesRouter.get(
-    "/companies",
-    asyncHandler(async (req, res) => {
-        const q = req.query;
-        const companies = await getCompanies({
-            ats_platform: toStr(q.ats_platform),
-            crawl_status: toStr(q.crawl_status),
-            india_friendly: toStr(q.india_friendly),
-            search: toStr(q.search),
-            limit: toInt(q.limit, 200, 1, 500),
-            offset: toInt(q.offset, 0, 0),
-        });
-        res.json({ companies, count: companies.length });
-    }),
-);
-
-companiesRouter.get(
-    "/companies/stats",
-    asyncHandler(async (_req, res) => {
-        res.json(await getCompanyStats());
-    }),
-);
-
-companiesRouter.post(
-    "/companies",
-    asyncHandler(async (req, res) => {
-        const parsed = companyInputSchema.safeParse(req.body);
-        if (!parsed.success) {
-            detail(res, 422, parsed.error.message);
-            return;
-        }
-        const data: CompanyRow = {
-            ...parsed.data,
-            id: makeCompanyId(parsed.data.name),
-            last_crawled: "",
-            crawl_status: "active",
-        };
-        await upsertCompany(data);
-        res.json({ ok: true, id: data.id });
-    }),
-);
-
-companiesRouter.patch(
-    "/companies/:companyId",
-    asyncHandler(async (req, res) => {
-        const companyId = req.params.companyId as string;
-        const existing = await getCompanyById(companyId);
-        if (!existing) {
-            res.json({ error: "Not found" });
-            return;
-        }
-        const parsed = companyInputSchema.safeParse(req.body);
-        if (!parsed.success) {
-            detail(res, 422, parsed.error.message);
-            return;
-        }
-        const data: CompanyRow = {
-            ...parsed.data,
-            id: companyId,
-            last_crawled: existing.last_crawled ?? "",
-            crawl_status: existing.crawl_status ?? "active",
-        };
-        await upsertCompany(data);
-        res.json({ ok: true });
-    }),
-);
-
-companiesRouter.delete(
-    "/companies/:companyId",
-    asyncHandler(async (req, res) => {
-        await updateCompanyCrawlStatus(req.params.companyId as string, "paused", utcNowIso());
-        res.json({ ok: true });
-    }),
-);
-
-companiesRouter.post(
-    "/companies/:companyId/activate",
-    asyncHandler(async (req, res) => {
-        await updateCompanyCrawlStatus(req.params.companyId as string, "active");
-        res.json({ ok: true });
-    }),
-);
-
-companiesRouter.post(
-    "/companies/seed",
-    asyncHandler(async (_req, res) => {
-        const companies = getAllSeedCompanies();
-        let added = 0;
-        for (const c of companies) if (await upsertCompany(c)) added += 1;
-        res.json({ seeded: companies.length, added });
-    }),
-);
-
-companiesRouter.post(
-    "/companies/mega-seed",
-    asyncHandler(async (_req, res) => {
-        const companies = getAllMegaCompanies();
-        let added = 0;
-        for (const c of companies) if (await upsertCompany(c)) added += 1;
-        res.json({ total_in_list: companies.length, added });
-    }),
-);
-
-companiesRouter.post(
-    "/companies/crawl",
-    asyncHandler(async (_req, res) => {
-        res.json(await runCompanyCrawl());
-    }),
-);
-
-companiesRouter.post(
-    "/companies/:companyId/crawl",
-    asyncHandler(async (req, res) => {
-        res.json(await runCompanyCrawl([req.params.companyId as string]));
-    }),
-);
-
-// detect-ats and bulk discover are not implemented.
-companiesRouter.post("/companies/detect-ats", (_req, res) => {
-    res.json({ error: "not implemented" });
-});
-
-companiesRouter.post("/companies/discover", (_req, res) => {
-    res.json({ error: "not implemented" });
-});
+export const companiesRoutes = {
+    "/api/companies": {
+        GET: async (req) => {
+            const q = getQuery(req);
+            const companies = await getCompanies({
+                ats_platform: toStr(q.ats_platform),
+                crawl_status: toStr(q.crawl_status),
+                india_friendly: toStr(q.india_friendly),
+                search: toStr(q.search),
+                limit: toInt(q.limit, 200, 1, 500),
+                offset: toInt(q.offset, 0, 0),
+            });
+            return Response.json({ companies, count: companies.length });
+        },
+        POST: async (req) => {
+            const parsed = companyInputSchema.safeParse(await readJson(req));
+            if (!parsed.success) {
+                return detail(422, parsed.error.message);
+            }
+            const data: CompanyRow = {
+                ...parsed.data,
+                id: makeCompanyId(parsed.data.name),
+                last_crawled: "",
+                crawl_status: "active",
+            };
+            await upsertCompany(data);
+            return Response.json({ ok: true, id: data.id });
+        },
+    },
+    "/api/companies/stats": {
+        GET: async (_req) => {
+            return Response.json(await getCompanyStats());
+        },
+    },
+    "/api/companies/:companyId": {
+        PATCH: async (req) => {
+            const companyId = req.params.companyId as string;
+            const existing = await getCompanyById(companyId);
+            if (!existing) {
+                return Response.json({ error: "Not found" });
+            }
+            const parsed = companyInputSchema.safeParse(await readJson(req));
+            if (!parsed.success) {
+                return detail(422, parsed.error.message);
+            }
+            const data: CompanyRow = {
+                ...parsed.data,
+                id: companyId,
+                last_crawled: existing.last_crawled ?? "",
+                crawl_status: existing.crawl_status ?? "active",
+            };
+            await upsertCompany(data);
+            return Response.json({ ok: true });
+        },
+        DELETE: async (req) => {
+            await updateCompanyCrawlStatus(req.params.companyId as string, "paused", utcNowIso());
+            return Response.json({ ok: true });
+        },
+    },
+    "/api/companies/:companyId/activate": {
+        POST: async (req) => {
+            await updateCompanyCrawlStatus(req.params.companyId as string, "active");
+            return Response.json({ ok: true });
+        },
+    },
+    "/api/companies/seed": {
+        POST: async (_req) => {
+            const companies = getAllSeedCompanies();
+            let added = 0;
+            for (const c of companies) if (await upsertCompany(c)) added += 1;
+            return Response.json({ seeded: companies.length, added });
+        },
+    },
+    "/api/companies/mega-seed": {
+        POST: async (_req) => {
+            const companies = getAllMegaCompanies();
+            let added = 0;
+            for (const c of companies) if (await upsertCompany(c)) added += 1;
+            return Response.json({ total_in_list: companies.length, added });
+        },
+    },
+    "/api/companies/crawl": {
+        POST: async (_req) => {
+            return Response.json(await runCompanyCrawl());
+        },
+    },
+    "/api/companies/:companyId/crawl": {
+        POST: async (req) => {
+            return Response.json(await runCompanyCrawl([req.params.companyId as string]));
+        },
+    },
+    "/api/companies/detect-ats": {
+        // detect-ats and bulk discover are not implemented.
+        POST: (_req) => {
+            return Response.json({ error: "not implemented" });
+        },
+    },
+    "/api/companies/discover": {
+        POST: (_req) => {
+            return Response.json({ error: "not implemented" });
+        },
+    },
+} satisfies Bun.Serve.Routes<undefined, string>;
